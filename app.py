@@ -5,7 +5,7 @@ from datetime import datetime
 st.set_page_config(page_title="JAEJU Stock & POS", layout="wide")
 
 # ---------- DATABASE ----------
-conn = sqlite3.connect("jaeju.db", check_same_thread=False)
+conn = sqlite3.connect("jaeju_v2.db", check_same_thread=False)
 cur = conn.cursor()
 
 cur.execute("""

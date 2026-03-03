@@ -1,40 +1,4 @@
-import sqlite3
-from contextlib import contextmanager
-from datetime import datetime
-import pandas as pd
-import streamlit as st
-
-DB_PATH = "jaeju_stock.db"
-
-LOC_TRUCK = "Food Truck"
-LOC_PREP = "Prep Kitchen"
-LOCATIONS = [LOC_TRUCK, LOC_PREP]
-
-ORDER_STATUS_PENDING = "PENDING"
-ORDER_STATUS_FULFILLED = "FULFILLED"
-ORDER_STATUS_CANCELLED = "CANCELLED"
-
-
-@contextmanager
-def get_conn():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    try:
-        yield conn
-    finally:
-        conn.close()
-
-
-def init_db():
-    with get_conn() as conn:
-        cur = conn.cursor()
-
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS items (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL UNIQUE,
-            unit TEXT NOT NULL,
-            par_level REAL DEFAULT 0,
+https://jaeju-stock-bm2nofvxrxqjsdhxdf2m28.streamlit.app/            par_level REAL DEFAULT 0,
             price_nzd REAL DEFAULT 0,
             active INTEGER DEFAULT 1
         );

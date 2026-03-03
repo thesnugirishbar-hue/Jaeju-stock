@@ -1,11 +1,13 @@
-import sqlite3
-from contextlib import contextmanager
 from datetime import datetime, date
 import pandas as pd
 import streamlit as st
 
-DB_PATH = "jaeju_stock.db"
+import gspread
+from google.oauth2.service_account import Credentials
 
+# ---------------------------
+# CONFIG
+# ---------------------------
 LOC_TRUCK = "Food Truck"
 LOC_PREP = "Prep Kitchen"
 LOCATIONS = [LOC_TRUCK, LOC_PREP]
@@ -17,191 +19,180 @@ ORDER_STATUS_CANCELLED = "CANCELLED"
 PAYMENT_EFTPOS = "EFTPOS"
 PAYMENT_CASH = "CASH"
 
+SHEET_NAME = "JAEJU_MASTER_DB"
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
 
-@contextmanager
-def get_conn():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    try:
-        yield conn
-    finally:
-        conn.close()
-
-
+# ---------------------------
+# TIME HELPERS
+# ---------------------------
 def now_iso():
     return datetime.now().isoformat(timespec="seconds")
-
 
 def today_str():
     return date.today().isoformat()
 
+# ---------------------------
+# TYPE HELPERS
+# ---------------------------
+def _safe_float(x, default=0.0):
+    try:
+        return float(x)
+    except:
+        return default
+
+def _safe_int(x, default=0):
+    try:
+        return int(float(x))
+    except:
+        return default
+
+# ---------------------------
+# GOOGLE SHEETS "DB"
+# ---------------------------
+@st.cache_resource
+def gs_client():
+    creds = Credentials.from_service_account_info(
+        st.secrets["gcp_service_account"],
+        scopes=SCOPES
+    )
+    return gspread.authorize(creds)
+
+def book():
+    return gs_client().open(SHEET_NAME)
+
+def ws(tab: str):
+    return book().worksheet(tab)
+
+def read_df(tab: str) -> pd.DataFrame:
+    w = ws(tab)
+    values = w.get_all_values()
+    if not values:
+        return pd.DataFrame()
+    header = values[0]
+    if len(values) == 1:
+        return pd.DataFrame(columns=header)
+    return pd.DataFrame(values[1:], columns=header)
+
+def next_id(tab: str) -> int:
+    df = read_df(tab)
+    if df.empty or "id" not in df.columns:
+        return 1
+    ids = df["id"].apply(lambda v: _safe_int(v, 0))
+    return int(ids.max()) + 1 if len(ids) else 1
+
+def find_row_idx(tab: str, col: str, value: str):
+    """
+    Returns 1-based sheet row index (including header row).
+    Data rows start at 2.
+    """
+    df = read_df(tab)
+    if df.empty or col not in df.columns:
+        return None
+    for i, v in enumerate(df[col].astype(str).tolist(), start=2):
+        if str(v) == str(value):
+            return i
+    return None
+
+def update_cells(tab: str, row_idx: int, updates: dict):
+    w = ws(tab)
+    header = w.row_values(1)
+    for col, val in updates.items():
+        if col not in header:
+            raise ValueError(f"Missing column '{col}' in tab '{tab}'")
+        c = header.index(col) + 1
+        w.update_cell(row_idx, c, val)
 
 def init_db():
-    with get_conn() as conn:
-        cur = conn.cursor()
+    """
+    Ensures tabs + headers exist. Never wipes data.
+    """
+    b = book()
+    required = {
+        "items": ["id","name","unit","par_level","price_nzd","active"],
+        "stock": ["item_id","location","qty"],
+        "movements": ["id","created_at","item_id","location","delta","reason","ref_type","ref_id"],
+        "orders": ["id","created_at","from_location","to_location","status","note"],
+        "order_lines": ["id","order_id","item_id","qty"],
+        "sales": ["id","created_at","sale_date","payment_method","note"],
+        "sale_lines": ["id","sale_id","menu_id","sku","name","qty","unit_price","line_total"],
+        "menu_items": ["id","sku","name","price","active","sort_order"],
+        "menu_recipes": ["id","menu_id","item_id","qty"],
+    }
+    existing = {w.title for w in b.worksheets()}
+    for tab, headers in required.items():
+        if tab not in existing:
+            w = b.add_worksheet(title=tab, rows="3000", cols="30")
+            w.append_row(headers)
+        else:
+            w = b.worksheet(tab)
+            if not w.row_values(1):
+                w.append_row(headers)
 
-        # Inventory
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS items (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            name TEXT NOT NULL UNIQUE,
-            unit TEXT NOT NULL,
-            par_level REAL DEFAULT 0,
-            price_nzd REAL DEFAULT 0,
-            active INTEGER DEFAULT 1
-        );
-        """)
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS stock (
-            item_id INTEGER NOT NULL,
-            location TEXT NOT NULL,
-            qty REAL NOT NULL DEFAULT 0,
-            PRIMARY KEY (item_id, location),
-            FOREIGN KEY (item_id) REFERENCES items(id)
-        );
-        """)
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS movements (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            created_at TEXT NOT NULL,
-            item_id INTEGER NOT NULL,
-            location TEXT NOT NULL,
-            delta REAL NOT NULL,
-            reason TEXT NOT NULL,
-            ref_type TEXT,
-            ref_id INTEGER,
-            FOREIGN KEY (item_id) REFERENCES items(id)
-        );
-        """)
-
-        # Orders: Truck -> Prep
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS orders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            created_at TEXT NOT NULL,
-            from_location TEXT NOT NULL,
-            to_location TEXT NOT NULL,
-            status TEXT NOT NULL,
-            note TEXT
-        );
-        """)
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS order_lines (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            order_id INTEGER NOT NULL,
-            item_id INTEGER NOT NULL,
-            qty REAL NOT NULL,
-            FOREIGN KEY (order_id) REFERENCES orders(id),
-            FOREIGN KEY (item_id) REFERENCES items(id)
-        );
-        """)
-
-        # Sales (POS)
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS sales (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            created_at TEXT NOT NULL,
-            sale_date TEXT NOT NULL,
-            payment_method TEXT NOT NULL,
-            note TEXT
-        );
-        """)
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS sale_lines (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            sale_id INTEGER NOT NULL,
-            menu_id INTEGER NOT NULL,
-            sku TEXT NOT NULL,
-            name TEXT NOT NULL,
-            qty REAL NOT NULL,
-            unit_price REAL NOT NULL,
-            line_total REAL NOT NULL,
-            FOREIGN KEY (sale_id) REFERENCES sales(id)
-        );
-        """)
-
-                # --- DB MIGRATION: ensure menu_id column exists ---
-        cols = [r["name"] for r in cur.execute("PRAGMA table_info(sale_lines);").fetchall()]
-        if "menu_id" not in cols:
-            cur.execute("ALTER TABLE sale_lines ADD COLUMN menu_id INTEGER DEFAULT 0;")
-
-        # Menu (editable in-app)
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS menu_items (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            sku TEXT NOT NULL UNIQUE,
-            name TEXT NOT NULL,
-            price REAL NOT NULL DEFAULT 0,
-            active INTEGER NOT NULL DEFAULT 1,
-            sort_order INTEGER NOT NULL DEFAULT 0
-        );
-        """)
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS menu_recipes (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            menu_id INTEGER NOT NULL,
-            item_id INTEGER NOT NULL,
-            qty REAL NOT NULL,
-            UNIQUE(menu_id, item_id),
-            FOREIGN KEY (menu_id) REFERENCES menu_items(id),
-            FOREIGN KEY (item_id) REFERENCES items(id)
-        );
-        """)
-        conn.commit()
-
-
+# ---------------------------
+# ITEMS + STOCK
+# ---------------------------
 def ensure_stock_rows_for_item(item_id: int):
-    with get_conn() as conn:
-        cur = conn.cursor()
-        for loc in LOCATIONS:
-            cur.execute("INSERT OR IGNORE INTO stock(item_id, location, qty) VALUES (?, ?, 0)",
-                        (item_id, loc))
-        conn.commit()
+    df = read_df("stock")
+    existing = set()
+    if not df.empty:
+        for _, r in df.iterrows():
+            existing.add((str(r["item_id"]), str(r["location"])))
 
+    rows = []
+    for loc in LOCATIONS:
+        if (str(item_id), loc) not in existing:
+            rows.append([item_id, loc, 0])
+    if rows:
+        ws("stock").append_rows(rows, value_input_option="USER_ENTERED")
 
 def get_items_df(active_only=True):
-    with get_conn() as conn:
-        q = "SELECT id, name, unit, par_level, price_nzd, active FROM items"
-        if active_only:
-            q += " WHERE active = 1"
-        q += " ORDER BY name COLLATE NOCASE"
-        return pd.read_sql_query(q, conn)
-
+    df = read_df("items")
+    if df.empty:
+        return pd.DataFrame(columns=["id","name","unit","par_level","price_nzd","active"])
+    df["id"] = df["id"].apply(lambda v: _safe_int(v, 0))
+    df["par_level"] = df["par_level"].apply(lambda v: _safe_float(v, 0.0))
+    df["price_nzd"] = df["price_nzd"].apply(lambda v: _safe_float(v, 0.0))
+    df["active"] = df["active"].apply(lambda v: 1 if str(v).lower() in ["1","true","yes"] else 0)
+    if active_only:
+        df = df[df["active"] == 1]
+    return df.sort_values("name", key=lambda s: s.astype(str).str.lower())
 
 def add_item(name: str, unit: str, par_level: float, price_nzd: float, active: int = 1):
     name = name.strip()
     if not name:
         raise ValueError("Item name cannot be empty.")
 
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT id FROM items WHERE name = ?", (name,))
-        row = cur.fetchone()
-        if row:
-            item_id = int(row["id"])
-            cur.execute("""
-                UPDATE items
-                SET unit = ?, par_level = ?, price_nzd = ?, active = ?
-                WHERE id = ?
-            """, (unit, par_level, price_nzd, active, item_id))
-        else:
-            cur.execute("""
-                INSERT INTO items(name, unit, par_level, price_nzd, active)
-                VALUES (?, ?, ?, ?, ?)
-            """, (name, unit, par_level, price_nzd, active))
-            item_id = cur.lastrowid
-        conn.commit()
+    row_idx = find_row_idx("items", "name", name)
+    if row_idx is None:
+        iid = next_id("items")
+        ws("items").append_row([iid, name, unit, par_level, price_nzd, int(active)], value_input_option="USER_ENTERED")
+        item_id = iid
+    else:
+        update_cells("items", row_idx, {
+            "unit": unit,
+            "par_level": par_level,
+            "price_nzd": price_nzd,
+            "active": int(active),
+        })
+        w = ws("items")
+        header = w.row_values(1)
+        item_id = _safe_int(w.cell(row_idx, header.index("id")+1).value, 0)
 
     ensure_stock_rows_for_item(item_id)
 
-
 def get_item_id_by_name(name: str):
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT id FROM items WHERE name = ? AND active = 1", (name,))
-        row = cur.fetchone()
-        return int(row["id"]) if row else None
-
+    row_idx = find_row_idx("items", "name", name)
+    if row_idx is None:
+        return None
+    w = ws("items")
+    header = w.row_values(1)
+    active_val = str(w.cell(row_idx, header.index("active")+1).value).lower()
+    if active_val not in ["1","true","yes"]:
+        return None
+    return _safe_int(w.cell(row_idx, header.index("id")+1).value, None)
 
 def adjust_stock(item_id: int, location: str, delta: float, reason: str, ref_type=None, ref_id=None):
     if location not in LOCATIONS:
@@ -209,36 +200,49 @@ def adjust_stock(item_id: int, location: str, delta: float, reason: str, ref_typ
     if reason.strip() == "":
         raise ValueError("Reason is required.")
 
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("INSERT OR IGNORE INTO stock(item_id, location, qty) VALUES (?, ?, 0)",
-                    (item_id, location))
-        cur.execute("UPDATE stock SET qty = qty + ? WHERE item_id = ? AND location = ?",
-                    (delta, item_id, location))
-        cur.execute("""
-            INSERT INTO movements(created_at, item_id, location, delta, reason, ref_type, ref_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (now_iso(), item_id, location, delta, reason, ref_type, ref_id))
-        conn.commit()
+    ensure_stock_rows_for_item(item_id)
+    stock = read_df("stock")
 
+    target_row = None
+    current_qty = 0.0
+    for i, r in enumerate(stock.to_dict("records"), start=2):
+        if str(r["item_id"]) == str(item_id) and str(r["location"]) == str(location):
+            target_row = i
+            current_qty = _safe_float(r["qty"], 0.0)
+            break
+
+    new_qty = current_qty + float(delta)
+    if target_row is None:
+        ws("stock").append_row([item_id, location, new_qty], value_input_option="USER_ENTERED")
+    else:
+        update_cells("stock", target_row, {"qty": new_qty})
+
+    mid = next_id("movements")
+    ws("movements").append_row(
+        [mid, now_iso(), item_id, location, float(delta), reason, ref_type or "", ref_id or ""],
+        value_input_option="USER_ENTERED"
+    )
 
 def get_stock_df():
-    with get_conn() as conn:
-        return pd.read_sql_query("""
-            SELECT i.id AS item_id, i.name, i.unit, i.par_level, s.location, s.qty
-            FROM stock s
-            JOIN items i ON i.id = s.item_id
-            WHERE i.active = 1
-            ORDER BY i.name COLLATE NOCASE, s.location
-        """, conn)
+    stock = read_df("stock")
+    items = get_items_df(active_only=True)
+    if stock.empty or items.empty:
+        return pd.DataFrame(columns=["item_id","name","unit","par_level","location","qty"])
 
+    stock["item_id"] = stock["item_id"].apply(lambda v: _safe_int(v, 0))
+    stock["qty"] = stock["qty"].apply(lambda v: _safe_float(v, 0.0))
+
+    merged = stock.merge(items[["id","name","unit","par_level"]], left_on="item_id", right_on="id", how="inner")
+    return merged[["item_id","name","unit","par_level","location","qty"]].sort_values(
+        ["name","location"], key=lambda s: s.astype(str).str.lower()
+    )
 
 def get_stock_pivot():
     df = get_stock_df()
     if df.empty:
         return df
     pivot = df.pivot_table(
-        index=["item_id", "name", "unit", "par_level"],
+        index=["item_id","name","unit","par_level"],
         columns="location",
         values="qty",
         aggfunc="sum"
@@ -249,71 +253,65 @@ def get_stock_pivot():
     pivot["Below PAR?"] = (pivot[LOC_PREP] < pivot["par_level"]).map({True: "YES", False: ""})
     return pivot
 
-
 # ---------------------------
-# Orders
+# ORDERS
 # ---------------------------
 def create_order(note: str = "") -> int:
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO orders(created_at, from_location, to_location, status, note)
-            VALUES (?, ?, ?, ?, ?)
-        """, (now_iso(), LOC_TRUCK, LOC_PREP, ORDER_STATUS_PENDING, note.strip()))
-        order_id = cur.lastrowid
-        conn.commit()
-    return order_id
-
+    oid = next_id("orders")
+    ws("orders").append_row([oid, now_iso(), LOC_TRUCK, LOC_PREP, ORDER_STATUS_PENDING, note.strip()], value_input_option="USER_ENTERED")
+    return oid
 
 def add_order_line(order_id: int, item_id: int, qty: float):
     if qty <= 0:
         raise ValueError("Qty must be > 0.")
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("INSERT INTO order_lines(order_id, item_id, qty) VALUES (?, ?, ?)",
-                    (order_id, item_id, qty))
-        conn.commit()
-
+    lid = next_id("order_lines")
+    ws("order_lines").append_row([lid, int(order_id), int(item_id), float(qty)], value_input_option="USER_ENTERED")
 
 def get_orders_df(limit=100):
-    with get_conn() as conn:
-        return pd.read_sql_query(
-            "SELECT id, created_at, status, note FROM orders ORDER BY id DESC LIMIT ?",
-            conn, params=(limit,)
-        )
-
+    df = read_df("orders")
+    if df.empty:
+        return pd.DataFrame(columns=["id","created_at","status","note"])
+    df["id"] = df["id"].apply(lambda v: _safe_int(v, 0))
+    df = df.sort_values("id", ascending=False).head(limit)
+    return df[["id","created_at","status","note"]]
 
 def get_order_lines_df(order_id: int):
-    with get_conn() as conn:
-        return pd.read_sql_query("""
-            SELECT i.name, i.unit, ol.qty, ol.item_id
-            FROM order_lines ol
-            JOIN items i ON i.id = ol.item_id
-            WHERE ol.order_id = ?
-            ORDER BY i.name COLLATE NOCASE
-        """, conn, params=(order_id,))
+    ol = read_df("order_lines")
+    items = get_items_df(active_only=True)
+    if ol.empty:
+        return pd.DataFrame(columns=["name","unit","qty","item_id"])
 
+    ol["order_id"] = ol["order_id"].apply(lambda v: _safe_int(v, 0))
+    ol = ol[ol["order_id"] == int(order_id)].copy()
+    if ol.empty:
+        return pd.DataFrame(columns=["name","unit","qty","item_id"])
+
+    ol["item_id"] = ol["item_id"].apply(lambda v: _safe_int(v, 0))
+    ol["qty"] = ol["qty"].apply(lambda v: _safe_float(v, 0.0))
+
+    merged = ol.merge(items[["id","name","unit"]], left_on="item_id", right_on="id", how="left")
+    return merged[["name","unit","qty","item_id"]].sort_values("name", key=lambda s: s.astype(str).str.lower())
 
 def set_order_status(order_id: int, status: str):
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("UPDATE orders SET status = ? WHERE id = ?", (status, order_id))
-        conn.commit()
-
+    row_idx = find_row_idx("orders", "id", str(order_id))
+    if row_idx is None:
+        raise ValueError("Order not found.")
+    update_cells("orders", row_idx, {"status": status})
 
 def fulfill_order(order_id: int):
     lines = get_order_lines_df(order_id)
     if lines.empty:
         raise ValueError("Order has no lines.")
 
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT status FROM orders WHERE id = ?", (order_id,))
-        row = cur.fetchone()
-        if not row:
-            raise ValueError("Order not found.")
-        if row["status"] != ORDER_STATUS_PENDING:
-            raise ValueError(f"Order must be PENDING to fulfill (currently {row['status']}).")
+    orders = read_df("orders")
+    if orders.empty:
+        raise ValueError("Order not found.")
+    orders["id"] = orders["id"].apply(lambda v: _safe_int(v, 0))
+    row = orders.loc[orders["id"] == int(order_id)]
+    if row.empty:
+        raise ValueError("Order not found.")
+    if str(row.iloc[0]["status"]) != ORDER_STATUS_PENDING:
+        raise ValueError("Order must be PENDING to fulfill.")
 
     prep = get_stock_df()
     prep_map = {int(r["item_id"]): float(r["qty"]) for _, r in prep.iterrows() if r["location"] == LOC_PREP}
@@ -332,167 +330,169 @@ def fulfill_order(order_id: int):
 
     set_order_status(order_id, ORDER_STATUS_FULFILLED)
 
-
 def get_movements_df(limit=300):
-    with get_conn() as conn:
-        return pd.read_sql_query("""
-            SELECT m.created_at, i.name, m.location, m.delta, m.reason, m.ref_type, m.ref_id
-            FROM movements m
-            JOIN items i ON i.id = m.item_id
-            ORDER BY m.id DESC
-            LIMIT ?
-        """, conn, params=(limit,))
-
+    mv = read_df("movements")
+    items = get_items_df(active_only=False)
+    if mv.empty:
+        return pd.DataFrame(columns=["created_at","name","location","delta","reason","ref_type","ref_id"])
+    mv["id"] = mv["id"].apply(lambda v: _safe_int(v, 0))
+    mv = mv.sort_values("id", ascending=False).head(limit)
+    mv["item_id"] = mv["item_id"].apply(lambda v: _safe_int(v, 0))
+    merged = mv.merge(items[["id","name"]], left_on="item_id", right_on="id", how="left")
+    return merged[["created_at","name","location","delta","reason","ref_type","ref_id"]]
 
 # ---------------------------
-# Menu (editable)
+# MENU
 # ---------------------------
 def seed_menu_if_empty():
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) AS c FROM menu_items")
-        if int(cur.fetchone()["c"]) > 0:
-            return
-
-        starters = [
-            ("JUST_CHICKEN", "Just Chicken", 20.00, 1, 10),
-            ("SMALL_CHIPS", "Small Chicken on Chips", 22.00, 1, 20),
-            ("LARGE_CHIPS", "Large Chicken on Chips", 26.00, 1, 30),
-            ("BURGER", "Chicken Burger", 20.00, 1, 40),
-            ("CAULI", "Korean Cauli", 18.00, 1, 50),
-            ("CHIPS", "Chips", 8.00, 1, 60),
-        ]
-        cur.executemany("""
-            INSERT INTO menu_items(sku, name, price, active, sort_order)
-            VALUES (?, ?, ?, ?, ?)
-        """, starters)
-        conn.commit()
-
+    df = read_df("menu_items")
+    if not df.empty:
+        return
+    starters = [
+        ("JUST_CHICKEN", "Just Chicken", 20.00, 1, 10),
+        ("SMALL_CHIPS", "Small Chicken on Chips", 22.00, 1, 20),
+        ("LARGE_CHIPS", "Large Chicken on Chips", 26.00, 1, 30),
+        ("BURGER", "Chicken Burger", 20.00, 1, 40),
+        ("CAULI", "Korean Cauli", 18.00, 1, 50),
+        ("CHIPS", "Chips", 8.00, 1, 60),
+    ]
+    w = ws("menu_items")
+    for sku, name, price, active, sort_order in starters:
+        mid = next_id("menu_items")
+        w.append_row([mid, sku, name, price, active, sort_order], value_input_option="USER_ENTERED")
 
 def get_menu_items(active_only=True):
-    with get_conn() as conn:
-        q = "SELECT id, sku, name, price, active, sort_order FROM menu_items"
-        if active_only:
-            q += " WHERE active = 1"
-        q += " ORDER BY sort_order ASC, name COLLATE NOCASE"
-        return pd.read_sql_query(q, conn)
-
+    df = read_df("menu_items")
+    if df.empty:
+        return pd.DataFrame(columns=["id","sku","name","price","active","sort_order"])
+    df["id"] = df["id"].apply(lambda v: _safe_int(v, 0))
+    df["price"] = df["price"].apply(lambda v: _safe_float(v, 0.0))
+    df["active"] = df["active"].apply(lambda v: 1 if str(v).lower() in ["1","true","yes"] else 0)
+    df["sort_order"] = df["sort_order"].apply(lambda v: _safe_int(v, 0))
+    if active_only:
+        df = df[df["active"] == 1]
+    return df.sort_values(["sort_order","name"], key=lambda s: s.astype(str).str.lower())
 
 def upsert_menu_items(df: pd.DataFrame):
-    with get_conn() as conn:
-        cur = conn.cursor()
-        for _, r in df.iterrows():
-            sku = str(r.get("sku", "")).strip()
-            name = str(r.get("name", "")).strip()
-            if not sku or not name:
-                continue
-            price = float(r.get("price", 0.0))
-            active = int(r.get("active", 1))
-            sort_order = int(r.get("sort_order", 0))
+    w = ws("menu_items")
+    for _, r in df.iterrows():
+        sku = str(r.get("sku","")).strip()
+        name = str(r.get("name","")).strip()
+        if not sku or not name:
+            continue
+        price = float(r.get("price", 0.0))
+        active = 1 if bool(r.get("active", True)) else 0
+        sort_order = int(r.get("sort_order", 0))
 
-            if pd.isna(r.get("id")):
-                cur.execute("""
-                    INSERT OR IGNORE INTO menu_items(sku, name, price, active, sort_order)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (sku, name, price, active, sort_order))
+        rid = r.get("id", None)
+        if pd.isna(rid):
+            mid = next_id("menu_items")
+            w.append_row([mid, sku, name, price, active, sort_order], value_input_option="USER_ENTERED")
+        else:
+            row_idx = find_row_idx("menu_items", "id", str(int(rid)))
+            if row_idx is None:
+                w.append_row([int(rid), sku, name, price, active, sort_order], value_input_option="USER_ENTERED")
             else:
-                cur.execute("""
-                    UPDATE menu_items
-                    SET sku = ?, name = ?, price = ?, active = ?, sort_order = ?
-                    WHERE id = ?
-                """, (sku, name, price, active, sort_order, int(r["id"])))
-        conn.commit()
-
+                update_cells("menu_items", row_idx, {"sku": sku, "name": name, "price": price, "active": active, "sort_order": sort_order})
 
 def get_menu_recipe(menu_id: int):
-    with get_conn() as conn:
-        return pd.read_sql_query("""
-            SELECT mr.id, mr.menu_id, i.id AS item_id, i.name AS item_name, mr.qty
-            FROM menu_recipes mr
-            JOIN items i ON i.id = mr.item_id
-            WHERE mr.menu_id = ?
-            ORDER BY i.name COLLATE NOCASE
-        """, conn, params=(menu_id,))
-
+    mr = read_df("menu_recipes")
+    items = get_items_df(active_only=True)
+    if mr.empty:
+        return pd.DataFrame(columns=["id","menu_id","item_id","item_name","qty"])
+    mr["menu_id"] = mr["menu_id"].apply(lambda v: _safe_int(v, 0))
+    mr = mr[mr["menu_id"] == int(menu_id)].copy()
+    if mr.empty:
+        return pd.DataFrame(columns=["id","menu_id","item_id","item_name","qty"])
+    mr["item_id"] = mr["item_id"].apply(lambda v: _safe_int(v, 0))
+    mr["qty"] = mr["qty"].apply(lambda v: _safe_float(v, 0.0))
+    mr = mr[mr["qty"] > 0]
+    merged = mr.merge(items[["id","name"]], left_on="item_id", right_on="id", how="left")
+    merged = merged.rename(columns={"name":"item_name"})
+    return merged[["id","menu_id","item_id","item_name","qty"]].sort_values("item_name", key=lambda s: s.astype(str).str.lower())
 
 def upsert_menu_recipe(menu_id: int, df: pd.DataFrame):
-    with get_conn() as conn:
-        cur = conn.cursor()
-        # simplest reliable approach: wipe + reinsert
-        cur.execute("DELETE FROM menu_recipes WHERE menu_id = ?", (menu_id,))
-        conn.commit()
+    existing = read_df("menu_recipes")
+    if not existing.empty:
+        existing["menu_id"] = existing["menu_id"].apply(lambda v: _safe_int(v, 0))
+        for i, r in enumerate(existing.to_dict("records"), start=2):
+            if _safe_int(r.get("menu_id"), 0) == int(menu_id):
+                update_cells("menu_recipes", i, {"qty": 0})
 
-        for _, r in df.iterrows():
-            try:
-                item_id = int(r["item_id"])
-                qty = float(r["qty"])
-            except Exception:
-                continue
-            if item_id <= 0 or qty == 0:
-                continue
-            cur.execute("""
-                INSERT OR REPLACE INTO menu_recipes(menu_id, item_id, qty)
-                VALUES (?, ?, ?)
-            """, (menu_id, item_id, qty))
-        conn.commit()
-
+    w = ws("menu_recipes")
+    for _, r in df.iterrows():
+        try:
+            item_id = int(r["item_id"])
+            qty = float(r["qty"])
+        except Exception:
+            continue
+        if item_id <= 0 or qty == 0:
+            continue
+        rid = next_id("menu_recipes")
+        w.append_row([rid, int(menu_id), int(item_id), float(qty)], value_input_option="USER_ENTERED")
 
 def get_recipe_map(menu_id: int):
-    with get_conn() as conn:
-        df = pd.read_sql_query(
-            "SELECT item_id, qty FROM menu_recipes WHERE menu_id = ?",
-            conn, params=(menu_id,)
-        )
+    df = read_df("menu_recipes")
+    if df.empty:
+        return {}
+    df["menu_id"] = df["menu_id"].apply(lambda v: _safe_int(v, 0))
+    df = df[df["menu_id"] == int(menu_id)].copy()
+    if df.empty:
+        return {}
+    df["item_id"] = df["item_id"].apply(lambda v: _safe_int(v, 0))
+    df["qty"] = df["qty"].apply(lambda v: _safe_float(v, 0.0))
+    df = df[df["qty"] > 0]
     return {int(r["item_id"]): float(r["qty"]) for _, r in df.iterrows()}
 
-
 # ---------------------------
-# POS
+# SALES / POS
 # ---------------------------
 def create_sale(payment_method: str, note: str = "") -> int:
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO sales(created_at, sale_date, payment_method, note)
-            VALUES (?, ?, ?, ?)
-        """, (now_iso(), today_str(), payment_method, note.strip()))
-        sale_id = cur.lastrowid
-        conn.commit()
-    return sale_id
-
+    sid = next_id("sales")
+    ws("sales").append_row([sid, now_iso(), today_str(), payment_method, note.strip()], value_input_option="USER_ENTERED")
+    return sid
 
 def add_sale_line(sale_id: int, menu_id: int, sku: str, name: str, qty: float, unit_price: float):
     line_total = float(qty) * float(unit_price)
-    with get_conn() as conn:
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO sale_lines(sale_id, menu_id, sku, name, qty, unit_price, line_total)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (sale_id, menu_id, sku, name, qty, unit_price, line_total))
-        conn.commit()
-
+    lid = next_id("sale_lines")
+    ws("sale_lines").append_row([lid, int(sale_id), int(menu_id), sku, name, float(qty), float(unit_price), float(line_total)], value_input_option="USER_ENTERED")
 
 def get_today_sales_summary():
-    with get_conn() as conn:
-        pay = pd.read_sql_query("""
-            SELECT sale_date, payment_method, SUM(line_total) AS total
-            FROM sales s
-            JOIN sale_lines sl ON sl.sale_id = s.id
-            WHERE sale_date = ?
-            GROUP BY sale_date, payment_method
-        """, conn, params=(today_str(),))
+    sales = read_df("sales")
+    lines = read_df("sale_lines")
+    if sales.empty or lines.empty:
+        return (
+            pd.DataFrame(columns=["sale_date","payment_method","total"]),
+            pd.DataFrame(columns=["sku","name","qty","total"])
+        )
 
-        lines = pd.read_sql_query("""
-            SELECT sl.sku, sl.name, SUM(sl.qty) AS qty, SUM(sl.line_total) AS total
-            FROM sales s
-            JOIN sale_lines sl ON sl.sale_id = s.id
-            WHERE s.sale_date = ?
-            GROUP BY sl.sku, sl.name
-            ORDER BY total DESC
-        """, conn, params=(today_str(),))
+    sales["id"] = sales["id"].apply(lambda v: _safe_int(v, 0))
+    sales["sale_date"] = sales["sale_date"].astype(str)
 
-    return pay, lines
+    lines["sale_id"] = lines["sale_id"].apply(lambda v: _safe_int(v, 0))
+    lines["qty"] = lines["qty"].apply(lambda v: _safe_float(v, 0.0))
+    lines["line_total"] = lines["line_total"].apply(lambda v: _safe_float(v, 0.0))
 
+    merged = lines.merge(sales[["id","sale_date","payment_method"]], left_on="sale_id", right_on="id", how="left")
+    merged = merged[merged["sale_date"] == today_str()].copy()
+
+    if merged.empty:
+        return (
+            pd.DataFrame(columns=["sale_date","payment_method","total"]),
+            pd.DataFrame(columns=["sku","name","qty","total"])
+        )
+
+    pay = (
+        merged.groupby(["sale_date","payment_method"], as_index=False)["line_total"]
+        .sum()
+        .rename(columns={"line_total":"total"})
+    )
+    item = (
+        merged.groupby(["sku","name"], as_index=False)
+        .agg(qty=("qty","sum"), total=("line_total","sum"))
+        .sort_values("total", ascending=False)
+    )
+    return pay, item
 
 def record_pos_sale(menu_row: pd.Series, qty: float, payment_method: str, note: str = ""):
     if qty <= 0:
@@ -522,14 +522,13 @@ def record_pos_sale(menu_row: pd.Series, qty: float, payment_method: str, note: 
         )
     return sale_id
 
-
 # ---------------------------
-# Event Mode
+# EVENT MODE
 # ---------------------------
 def forecast_from_revenue(revenue_nzd: float, mix: dict, menu_df: pd.DataFrame):
     revenue_nzd = float(revenue_nzd)
-
     qty_rows = []
+
     for mid, share in mix.items():
         row = menu_df.loc[menu_df["id"] == mid]
         if row.empty:
@@ -548,66 +547,50 @@ def forecast_from_revenue(revenue_nzd: float, mix: dict, menu_df: pd.DataFrame):
 
     return qty_rows, ing_totals
 
-
 # ---------------------------
-# Mobile-friendly Orders draft state
+# Orders draft state (mobile friendly)
 # ---------------------------
 def ensure_order_lines_state():
     if "order_lines" not in st.session_state:
-        st.session_state["order_lines"] = []  # list[{"Item": str, "Qty": float}]
-
+        st.session_state["order_lines"] = []
 
 def add_to_order_draft(item_name: str, qty: float):
     ensure_order_lines_state()
     if qty <= 0:
         return
-    found = False
     for line in st.session_state["order_lines"]:
         if line["Item"] == item_name:
             line["Qty"] = float(line["Qty"]) + float(qty)
-            found = True
-            break
-    if not found:
-        st.session_state["order_lines"].append({"Item": item_name, "Qty": float(qty)})
-
+            return
+    st.session_state["order_lines"].append({"Item": item_name, "Qty": float(qty)})
 
 def set_order_draft_from_name_totals(name_totals: dict):
     ensure_order_lines_state()
-    st.session_state["order_lines"] = [
-        {"Item": k, "Qty": float(v)} for k, v in name_totals.items() if float(v) > 0
-    ]
-
+    st.session_state["order_lines"] = [{"Item": k, "Qty": float(v)} for k, v in name_totals.items() if float(v) > 0]
 
 # ---------------------------
 # APP UI
 # ---------------------------
 st.set_page_config(page_title="JAEJU Ops", page_icon="jaeju-logo.jpg", layout="wide")
+
+# init Sheets DB + seed
 init_db()
 seed_menu_if_empty()
 
 st.title("JAEJU Stock + POS + Events")
 
-# Mobile mode: dropdown navigation is easier than tabs
 mobile_mode = st.toggle("Mobile mode", value=True)
-
 PAGES = ["POS", "Event Mode", "Orders", "Dashboard", "Adjust Stock", "Menu Admin", "Items", "Movements"]
+
 if mobile_mode:
     page = st.selectbox("Go to", PAGES)
+    tabs = None
 else:
     tabs = st.tabs(PAGES)
     page = None
 
-
-def on_page(name: str) -> bool:
-    if mobile_mode:
-        return page == name
-    # tab index
-    idx = PAGES.index(name)
-    return True if tabs[idx] else False
-
-
 # -------- POS --------
-if (mobile_mode and page == "POS") or (not mobile_mode and True):
+if (mobile_mode and page == "POS") or (not mobile_mode):
     container = st.container() if mobile_mode else tabs[PAGES.index("POS")]
     with container:
         st.subheader("POS (one-tap buttons)")
@@ -622,7 +605,6 @@ if (mobile_mode and page == "POS") or (not mobile_mode and True):
             if qty_mode:
                 qty = st.number_input("Qty", min_value=1.0, value=1.0, step=1.0)
 
-            # Big buttons grid (2 per row)
             cols = st.columns(2)
             for i, (_, r) in enumerate(menu.iterrows()):
                 with cols[i % 2]:
@@ -652,9 +634,8 @@ if (mobile_mode and page == "POS") or (not mobile_mode and True):
         else:
             st.info("No sales recorded today yet.")
 
-
 # -------- Event Mode --------
-if (mobile_mode and page == "Event Mode") or (not mobile_mode and True):
+if (mobile_mode and page == "Event Mode") or (not mobile_mode):
     container = st.container() if mobile_mode else tabs[PAGES.index("Event Mode")]
     with container:
         st.subheader("Event Mode (Revenue → Ingredients → Draft Order)")
@@ -718,9 +699,8 @@ if (mobile_mode and page == "Event Mode") or (not mobile_mode and True):
                     set_order_draft_from_name_totals(name_totals)
                     st.success("Draft created. Go to Orders tab and press Create order.")
 
-
-# -------- Orders (mobile-proof) --------
-if (mobile_mode and page == "Orders") or (not mobile_mode and True):
+# -------- Orders --------
+if (mobile_mode and page == "Orders") or (not mobile_mode):
     container = st.container() if mobile_mode else tabs[PAGES.index("Orders")]
     with container:
         st.subheader("Truck → Prep Kitchen Orders (mobile friendly)")
@@ -817,9 +797,8 @@ if (mobile_mode and page == "Orders") or (not mobile_mode and True):
                 st.success("Cancelled.")
                 st.rerun()
 
-
 # -------- Dashboard --------
-if (mobile_mode and page == "Dashboard") or (not mobile_mode and True):
+if (mobile_mode and page == "Dashboard") or (not mobile_mode):
     container = st.container() if mobile_mode else tabs[PAGES.index("Dashboard")]
     with container:
         st.subheader("Stock snapshot")
@@ -833,9 +812,8 @@ if (mobile_mode and page == "Dashboard") or (not mobile_mode and True):
                 hide_index=True
             )
 
-
 # -------- Adjust Stock --------
-if (mobile_mode and page == "Adjust Stock") or (not mobile_mode and True):
+if (mobile_mode and page == "Adjust Stock") or (not mobile_mode):
     container = st.container() if mobile_mode else tabs[PAGES.index("Adjust Stock")]
     with container:
         st.subheader("Adjust stock (counts, wastage, deliveries)")
@@ -860,13 +838,11 @@ if (mobile_mode and page == "Adjust Stock") or (not mobile_mode and True):
                 except Exception as e:
                     st.error(str(e))
 
-
 # -------- Menu Admin --------
-if (mobile_mode and page == "Menu Admin") or (not mobile_mode and True):
+if (mobile_mode and page == "Menu Admin") or (not mobile_mode):
     container = st.container() if mobile_mode else tabs[PAGES.index("Menu Admin")]
     with container:
         st.subheader("Menu Admin (edit menu + recipes)")
-
         st.info("Tip: Do this on a laptop if possible. Mobile works, but it’s slower.")
 
         menu_df = get_menu_items(active_only=False)
@@ -940,9 +916,8 @@ if (mobile_mode and page == "Menu Admin") or (not mobile_mode and True):
                     except Exception as e:
                         st.error(str(e))
 
-
 # -------- Items --------
-if (mobile_mode and page == "Items") or (not mobile_mode and True):
+if (mobile_mode and page == "Items") or (not mobile_mode):
     container = st.container() if mobile_mode else tabs[PAGES.index("Items")]
     with container:
         st.subheader("Items")
@@ -965,9 +940,8 @@ if (mobile_mode and page == "Items") or (not mobile_mode and True):
         if not df.empty:
             st.dataframe(df, use_container_width=True, hide_index=True)
 
-
 # -------- Movements --------
-if (mobile_mode and page == "Movements") or (not mobile_mode and True):
+if (mobile_mode and page == "Movements") or (not mobile_mode):
     container = st.container() if mobile_mode else tabs[PAGES.index("Movements")]
     with container:
         st.subheader("Movements log (audit trail)")

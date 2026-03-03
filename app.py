@@ -4,10 +4,10 @@ from datetime import datetime
 
 st.set_page_config(page_title="JAEJU System", layout="wide")
 
-DB_NAME = "jaeju_clean_v1.db"
+DB_NAME = "jaeju_stable_v2.db"
 LOCATIONS = ["Trailer", "Prep Kitchen"]
 
-# ---------- DB ----------
+# ---------- DATABASE ----------
 conn = sqlite3.connect(DB_NAME, check_same_thread=False)
 cur = conn.cursor()
 
@@ -56,6 +56,16 @@ CREATE TABLE IF NOT EXISTS sales (
 )
 """)
 
+cur.execute("""
+CREATE TABLE IF NOT EXISTS orders (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ingredient_id INTEGER,
+    qty REAL,
+    status TEXT,
+    created_at TEXT
+)
+""")
+
 conn.commit()
 
 # ---------- SIDEBAR ----------
@@ -66,7 +76,8 @@ page = st.sidebar.radio("Navigate", [
     "Build Recipe",
     "Stock Overview",
     "Adjust Stock",
-    "Transfer Stock",
+    "Create Order",
+    "Fulfil Orders",
     "POS",
     "Sales Log"
 ])
@@ -79,24 +90,25 @@ if page == "Add Ingredient":
     par = st.number_input("Par Level", 0.0)
 
     if st.button("Add"):
-        try:
-            cur.execute(
-                "INSERT INTO ingredients (name, unit, par_level) VALUES (?, ?, ?)",
-                (name, unit, par)
-            )
-            conn.commit()
-
-            ing_id = cur.lastrowid
-            for loc in LOCATIONS:
+        if name:
+            try:
                 cur.execute(
-                    "INSERT OR IGNORE INTO stock (ingredient_id, location, qty) VALUES (?, ?, 0)",
-                    (ing_id, loc)
+                    "INSERT INTO ingredients (name, unit, par_level) VALUES (?, ?, ?)",
+                    (name, unit, par)
                 )
-            conn.commit()
+                conn.commit()
 
-            st.success("Ingredient added")
-        except:
-            st.error("Ingredient already exists")
+                ing_id = cur.lastrowid
+                for loc in LOCATIONS:
+                    cur.execute(
+                        "INSERT OR IGNORE INTO stock (ingredient_id, location, qty) VALUES (?, ?, 0)",
+                        (ing_id, loc)
+                    )
+                conn.commit()
+
+                st.success("Ingredient added")
+            except:
+                st.error("Ingredient already exists")
 
 # ---------- ADD PRODUCT ----------
 if page == "Add Product":
@@ -105,15 +117,16 @@ if page == "Add Product":
     price = st.number_input("Sell Price", 0.0)
 
     if st.button("Add Product"):
-        try:
-            cur.execute(
-                "INSERT INTO products (name, price) VALUES (?, ?)",
-                (name, price)
-            )
-            conn.commit()
-            st.success("Product added")
-        except:
-            st.error("Product already exists")
+        if name:
+            try:
+                cur.execute(
+                    "INSERT INTO products (name, price) VALUES (?, ?)",
+                    (name, price)
+                )
+                conn.commit()
+                st.success("Product added")
+            except:
+                st.error("Product already exists")
 
 # ---------- BUILD RECIPE ----------
 if page == "Build Recipe":
@@ -148,14 +161,14 @@ if page == "Stock Overview":
     location = st.selectbox("Location", LOCATIONS)
 
     data = cur.execute("""
-    SELECT i.name, s.qty, i.unit, i.par_level
+    SELECT i.id, i.name, s.qty, i.unit, i.par_level
     FROM stock s
     JOIN ingredients i ON i.id = s.ingredient_id
     WHERE s.location = ?
     ORDER BY i.name
     """, (location,)).fetchall()
 
-    for name, qty, unit, par in data:
+    for ing_id, name, qty, unit, par in data:
         col1, col2, col3 = st.columns(3)
         col1.write(name)
         col2.write(f"{qty} {unit}")
@@ -184,31 +197,67 @@ if page == "Adjust Stock":
         conn.commit()
         st.success("Stock updated")
 
-# ---------- TRANSFER ----------
-if page == "Transfer Stock":
-    st.header("Transfer Prep → Trailer")
+# ---------- CREATE ORDER ----------
+if page == "Create Order":
+    st.header("Create Order (Trailer → Prep)")
 
     ingredients = cur.execute("SELECT id, name FROM ingredients").fetchall()
     ing_dict = {name: id for id, name in ingredients}
 
     selected = st.selectbox("Ingredient", list(ing_dict.keys()))
-    qty = st.number_input("Quantity", 0.0)
+    qty = st.number_input("Quantity Needed", 0.0)
 
-    if st.button("Transfer"):
-        ing_id = ing_dict[selected]
-
+    if st.button("Create Order"):
         cur.execute("""
-        UPDATE stock SET qty = qty - ?
-        WHERE ingredient_id = ? AND location = 'Prep Kitchen'
-        """, (qty, ing_id))
-
-        cur.execute("""
-        UPDATE stock SET qty = qty + ?
-        WHERE ingredient_id = ? AND location = 'Trailer'
-        """, (qty, ing_id))
-
+        INSERT INTO orders (ingredient_id, qty, status, created_at)
+        VALUES (?, ?, 'Pending', ?)
+        """, (ing_dict[selected], qty, datetime.now().isoformat()))
         conn.commit()
-        st.success("Transfer complete")
+        st.success("Order created")
+
+# ---------- FULFIL ORDERS ----------
+if page == "Fulfil Orders":
+    st.header("Pending Orders")
+
+    orders = cur.execute("""
+    SELECT o.id, i.name, o.qty, o.ingredient_id
+    FROM orders o
+    JOIN ingredients i ON i.id = o.ingredient_id
+    WHERE o.status = 'Pending'
+    """).fetchall()
+
+    for order_id, name, qty, ing_id in orders:
+        col1, col2, col3 = st.columns([3,1,1])
+        col1.write(f"{name} - {qty}")
+
+        if col3.button("Fulfil", key=f"fulfil_{order_id}"):
+
+            # Check prep stock first
+            prep_stock = cur.execute("""
+            SELECT qty FROM stock
+            WHERE ingredient_id = ? AND location = 'Prep Kitchen'
+            """, (ing_id,)).fetchone()[0]
+
+            if prep_stock < qty:
+                st.error("Not enough stock in Prep Kitchen")
+            else:
+                cur.execute("""
+                UPDATE stock SET qty = qty - ?
+                WHERE ingredient_id = ? AND location = 'Prep Kitchen'
+                """, (qty, ing_id))
+
+                cur.execute("""
+                UPDATE stock SET qty = qty + ?
+                WHERE ingredient_id = ? AND location = 'Trailer'
+                """, (qty, ing_id))
+
+                cur.execute("""
+                UPDATE orders SET status = 'Completed'
+                WHERE id = ?
+                """, (order_id,))
+
+                conn.commit()
+                st.success("Order fulfilled")
 
 # ---------- POS ----------
 if page == "POS":
@@ -222,28 +271,41 @@ if page == "POS":
         qty = col2.number_input("Qty", min_value=0, value=1, key=f"qty_{pid}")
 
         if col3.button("Sell", key=f"sell_{pid}"):
+
             recipe = cur.execute("""
             SELECT ingredient_id, qty_required
             FROM recipes
             WHERE product_id = ?
             """, (pid,)).fetchall()
 
+            # Check stock first
             for ing_id, qty_required in recipe:
-                cur.execute("""
-                UPDATE stock
-                SET qty = qty - ?
+                trailer_stock = cur.execute("""
+                SELECT qty FROM stock
                 WHERE ingredient_id = ? AND location = 'Trailer'
-                """, (qty_required * qty, ing_id))
+                """, (ing_id,)).fetchone()[0]
 
-            total = qty * price
+                if trailer_stock < qty_required * qty:
+                    st.error("Not enough stock in Trailer")
+                    break
+            else:
+                # Deduct
+                for ing_id, qty_required in recipe:
+                    cur.execute("""
+                    UPDATE stock
+                    SET qty = qty - ?
+                    WHERE ingredient_id = ? AND location = 'Trailer'
+                    """, (qty_required * qty, ing_id))
 
-            cur.execute("""
-            INSERT INTO sales (product_id, qty, total, created_at)
-            VALUES (?, ?, ?, ?)
-            """, (pid, qty, total, datetime.now().isoformat()))
+                total = qty * price
 
-            conn.commit()
-            st.success(f"Sold {qty} {name}")
+                cur.execute("""
+                INSERT INTO sales (product_id, qty, total, created_at)
+                VALUES (?, ?, ?, ?)
+                """, (pid, qty, total, datetime.now().isoformat()))
+
+                conn.commit()
+                st.success(f"Sold {qty} {name}")
 
 # ---------- SALES LOG ----------
 if page == "Sales Log":

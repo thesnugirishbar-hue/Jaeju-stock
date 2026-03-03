@@ -2,35 +2,56 @@ import streamlit as st
 import sqlite3
 from datetime import datetime
 
-st.set_page_config(page_title="JAEJU Stock & POS", layout="wide")
+st.set_page_config(page_title="JAEJU Pro System", layout="wide")
 
 # ---------- DATABASE ----------
-conn = sqlite3.connect("jaeju_v2.db", check_same_thread=False)
+conn = sqlite3.connect("jaeju_pro.db", check_same_thread=False)
 cur = conn.cursor()
 
+# INGREDIENTS
 cur.execute("""
-CREATE TABLE IF NOT EXISTS items (
+CREATE TABLE IF NOT EXISTS ingredients (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT UNIQUE NOT NULL,
-    price REAL DEFAULT 0,
-    par_level REAL DEFAULT 0,
-    active INTEGER DEFAULT 1
+    unit TEXT,
+    par_level REAL DEFAULT 0
 )
 """)
 
+# PRODUCTS
+cur.execute("""
+CREATE TABLE IF NOT EXISTS products (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT UNIQUE NOT NULL,
+    price REAL NOT NULL
+)
+""")
+
+# RECIPES (Product -> Ingredient mapping)
+cur.execute("""
+CREATE TABLE IF NOT EXISTS recipes (
+    product_id INTEGER,
+    ingredient_id INTEGER,
+    qty_required REAL,
+    PRIMARY KEY (product_id, ingredient_id)
+)
+""")
+
+# STOCK
 cur.execute("""
 CREATE TABLE IF NOT EXISTS stock (
-    item_id INTEGER,
+    ingredient_id INTEGER,
     location TEXT,
     qty REAL DEFAULT 0,
-    PRIMARY KEY (item_id, location)
+    PRIMARY KEY (ingredient_id, location)
 )
 """)
 
+# SALES
 cur.execute("""
 CREATE TABLE IF NOT EXISTS sales (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    item_id INTEGER,
+    product_id INTEGER,
     qty REAL,
     total REAL,
     created_at TEXT
@@ -39,65 +60,105 @@ CREATE TABLE IF NOT EXISTS sales (
 
 conn.commit()
 
-# ---------- SIDEBAR ----------
-st.sidebar.title("JAEJU Control")
+LOCATIONS = ["Trailer", "Prep Kitchen"]
+
+st.sidebar.title("JAEJU Pro")
 page = st.sidebar.radio("Navigate", [
-    "Add Item",
+    "Add Ingredient",
+    "Add Product",
+    "Build Recipe",
     "Stock Overview",
     "Adjust Stock",
-    "Transfer Stock",
     "POS"
 ])
 
-LOCATIONS = ["Trailer", "Prep Kitchen"]
-
-# ---------- ADD ITEM ----------
-if page == "Add Item":
-    st.header("Add New Item")
-
-    name = st.text_input("Item Name")
-    price = st.number_input("Sell Price", 0.0)
+# ---------- ADD INGREDIENT ----------
+if page == "Add Ingredient":
+    st.header("Add Ingredient")
+    name = st.text_input("Ingredient Name")
+    unit = st.text_input("Unit (kg, piece, L, etc)")
     par = st.number_input("Par Level", 0.0)
 
-    if st.button("Add Item"):
+    if st.button("Add"):
         try:
             cur.execute(
-                "INSERT INTO items (name, price, par_level) VALUES (?, ?, ?)",
-                (name, price, par)
+                "INSERT INTO ingredients (name, unit, par_level) VALUES (?, ?, ?)",
+                (name, unit, par)
             )
             conn.commit()
 
-            item_id = cur.lastrowid
-
+            ing_id = cur.lastrowid
             for loc in LOCATIONS:
                 cur.execute(
-                    "INSERT INTO stock (item_id, location, qty) VALUES (?, ?, 0)",
-                    (item_id, loc)
+                    "INSERT INTO stock (ingredient_id, location, qty) VALUES (?, ?, 0)",
+                    (ing_id, loc)
                 )
-
             conn.commit()
-            st.success("Item added successfully")
 
-        except sqlite3.IntegrityError:
-            st.error("Item name already exists")
+            st.success("Ingredient added")
+        except:
+            st.error("Ingredient already exists")
+
+# ---------- ADD PRODUCT ----------
+if page == "Add Product":
+    st.header("Add Product")
+    name = st.text_input("Product Name")
+    price = st.number_input("Sell Price", 0.0)
+
+    if st.button("Add Product"):
+        try:
+            cur.execute(
+                "INSERT INTO products (name, price) VALUES (?, ?)",
+                (name, price)
+            )
+            conn.commit()
+            st.success("Product added")
+        except:
+            st.error("Product already exists")
+
+# ---------- BUILD RECIPE ----------
+if page == "Build Recipe":
+    st.header("Build Recipe")
+
+    products = cur.execute("SELECT id, name FROM products").fetchall()
+    ingredients = cur.execute("SELECT id, name FROM ingredients").fetchall()
+
+    if products and ingredients:
+        product_dict = {name: id for id, name in products}
+        ingredient_dict = {name: id for id, name in ingredients}
+
+        selected_product = st.selectbox("Product", list(product_dict.keys()))
+        selected_ingredient = st.selectbox("Ingredient", list(ingredient_dict.keys()))
+        qty = st.number_input("Quantity Required", 0.0)
+
+        if st.button("Add To Recipe"):
+            cur.execute("""
+            INSERT OR REPLACE INTO recipes (product_id, ingredient_id, qty_required)
+            VALUES (?, ?, ?)
+            """, (
+                product_dict[selected_product],
+                ingredient_dict[selected_ingredient],
+                qty
+            ))
+            conn.commit()
+            st.success("Recipe updated")
 
 # ---------- STOCK OVERVIEW ----------
 if page == "Stock Overview":
     st.header("Stock Overview")
 
     data = cur.execute("""
-    SELECT i.name, s.location, s.qty, i.par_level
+    SELECT i.name, s.location, s.qty, i.par_level, i.unit
     FROM stock s
-    JOIN items i ON i.id = s.item_id
+    JOIN ingredients i ON i.id = s.ingredient_id
     ORDER BY i.name
     """).fetchall()
 
-    for row in data:
-        name, location, qty, par = row
+    for name, location, qty, par, unit in data:
         col1, col2, col3, col4 = st.columns(4)
         col1.write(name)
         col2.write(location)
-        col3.write(qty)
+        col3.write(f"{qty} {unit}")
         if qty < par:
             col4.error("LOW")
         else:
@@ -107,84 +168,54 @@ if page == "Stock Overview":
 if page == "Adjust Stock":
     st.header("Adjust Stock")
 
-    items = cur.execute("SELECT id, name FROM items").fetchall()
-    item_dict = {name: id for id, name in items}
+    ingredients = cur.execute("SELECT id, name FROM ingredients").fetchall()
+    ing_dict = {name: id for id, name in ingredients}
 
-    selected_name = st.selectbox("Select Item", list(item_dict.keys()))
+    selected = st.selectbox("Ingredient", list(ing_dict.keys()))
     location = st.selectbox("Location", LOCATIONS)
     change = st.number_input("Change (+ or -)", value=0.0)
 
     if st.button("Update"):
-        item_id = item_dict[selected_name]
         cur.execute("""
         UPDATE stock
         SET qty = qty + ?
-        WHERE item_id = ? AND location = ?
-        """, (change, item_id, location))
+        WHERE ingredient_id = ? AND location = ?
+        """, (change, ing_dict[selected], location))
         conn.commit()
         st.success("Stock updated")
 
-# ---------- TRANSFER STOCK ----------
-if page == "Transfer Stock":
-    st.header("Transfer Between Locations")
-
-    items = cur.execute("SELECT id, name FROM items").fetchall()
-    item_dict = {name: id for id, name in items}
-
-    selected_name = st.selectbox("Item", list(item_dict.keys()))
-    from_loc = st.selectbox("From", LOCATIONS)
-    to_loc = st.selectbox("To", LOCATIONS)
-    qty = st.number_input("Quantity", 0.0)
-
-    if st.button("Transfer"):
-        item_id = item_dict[selected_name]
-
-        cur.execute("""
-        UPDATE stock SET qty = qty - ?
-        WHERE item_id = ? AND location = ?
-        """, (qty, item_id, from_loc))
-
-        cur.execute("""
-        UPDATE stock SET qty = qty + ?
-        WHERE item_id = ? AND location = ?
-        """, (qty, item_id, to_loc))
-
-        conn.commit()
-        st.success("Transfer complete")
-
 # ---------- POS ----------
 if page == "POS":
-    st.header("Simple POS (Trailer)")
+    st.header("POS (Deducts Ingredients Automatically)")
 
-    items = cur.execute(
-        "SELECT id, name, price FROM items WHERE active = 1"
-    ).fetchall()
+    products = cur.execute("SELECT id, name, price FROM products").fetchall()
 
-    for item_id, name, price in items:
+    for product_id, name, price in products:
         col1, col2, col3 = st.columns([3,1,1])
         col1.write(f"{name} - ${price:.2f}")
+        qty = col2.number_input("Qty", 0, key=f"qty_{product_id}")
 
-        qty = col2.number_input(
-            "Qty",
-            min_value=0,
-            step=1,
-            key=f"qty_{item_id}"
-        )
-
-        if col3.button("Sell", key=f"sell_{item_id}"):
+        if col3.button("Sell", key=f"sell_{product_id}"):
             total = qty * price
 
-            cur.execute("""
-            INSERT INTO sales (item_id, qty, total, created_at)
-            VALUES (?, ?, ?, ?)
-            """, (item_id, qty, total, datetime.now().isoformat()))
+            # deduct ingredients
+            recipe_items = cur.execute("""
+            SELECT ingredient_id, qty_required
+            FROM recipes
+            WHERE product_id = ?
+            """, (product_id,)).fetchall()
+
+            for ing_id, qty_required in recipe_items:
+                cur.execute("""
+                UPDATE stock
+                SET qty = qty - ?
+                WHERE ingredient_id = ? AND location = 'Trailer'
+                """, (qty_required * qty, ing_id))
 
             cur.execute("""
-            UPDATE stock
-            SET qty = qty - ?
-            WHERE item_id = ? AND location = 'Trailer'
-            """, (qty, item_id))
+            INSERT INTO sales (product_id, qty, total, created_at)
+            VALUES (?, ?, ?, ?)
+            """, (product_id, qty, total, datetime.now().isoformat()))
 
             conn.commit()
-
             st.success(f"Sold {qty} {name}")

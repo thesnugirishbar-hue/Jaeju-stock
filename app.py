@@ -167,21 +167,38 @@ def append_rows(tab: str, rows: list[list]):
 # ---------------------------
 def init_db():
     """
-    Ensures tabs + headers exist. Never wipes data.
+    Ensures tabs + headers exist.
+    If a tab doesn't exist, we STOP and tell you to create it manually
+    (avoids add_worksheet permission errors).
     """
     b = book()
     required = {
-        "items": ["id", "name", "unit", "par_level", "price_nzd", "active"],
-        "stock": ["item_id", "location", "qty"],
-        "movements": ["id", "created_at", "item_id", "location", "delta", "reason", "ref_type", "ref_id"],
-        "orders": ["id", "created_at", "from_location", "to_location", "status", "note"],
-        "order_lines": ["id", "order_id", "item_id", "qty"],
-        "sales": ["id", "created_at", "sale_date", "payment_method", "note"],
-        "sale_lines": ["id", "sale_id", "menu_id", "sku", "name", "qty", "unit_price", "line_total"],
-        "menu_items": ["id", "sku", "name", "price", "active", "sort_order"],
-        "menu_recipes": ["id", "menu_id", "item_id", "qty"],
+        "items": ["id","name","unit","par_level","price_nzd","active"],
+        "stock": ["item_id","location","qty"],
+        "movements": ["id","created_at","item_id","location","delta","reason","ref_type","ref_id"],
+        "orders": ["id","created_at","from_location","to_location","status","note"],
+        "order_lines": ["id","order_id","item_id","qty"],
+        "sales": ["id","created_at","sale_date","payment_method","note"],
+        "sale_lines": ["id","sale_id","menu_id","sku","name","qty","unit_price","line_total"],
+        "menu_items": ["id","sku","name","price","active","sort_order"],
+        "menu_recipes": ["id","menu_id","item_id","qty"],
     }
 
+    existing = {w.title for w in b.worksheets()}
+    missing = [t for t in required.keys() if t not in existing]
+
+    if missing:
+        st.error(
+            "Your service account can open this spreadsheet but cannot create new tabs.\n\n"
+            "Create these tabs manually in Google Sheets (exact names):\n"
+            + "\n".join([f"- {t}" for t in missing])
+        )
+        st.stop()
+
+    # Ensure headers for existing tabs
+    for tab, headers in required.items():
+        w = b.worksheet(tab)
+        ensure_headers(w, headers)
     for tab, headers in required.items():
         w = get_or_create_ws(b, tab, rows=3000, cols=max(30, len(headers) + 5))
         ensure_headers(w, headers)

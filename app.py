@@ -1,8 +1,9 @@
 import streamlit as st
 import sqlite3
-from datetime import datetime
+from datetime import datetime, date
+import pandas as pd
 
-st.set_page_config(page_title="JAEJU System", layout="wide")
+st.set_page_config(page_title="JAEJU POS", layout="wide")
 
 DB_NAME = "jaeju_stable_v2.db"
 LOCATIONS = ["Trailer", "Prep Kitchen"]
@@ -71,141 +72,127 @@ conn.commit()
 # ---------- SIDEBAR ----------
 st.sidebar.title("JAEJU Control")
 page = st.sidebar.radio("Navigate", [
-    "Add Ingredient",
-    "Add Product",
-    "Build Recipe",
+    "POS",
+    "Sales Reports",
     "Stock Overview",
-    "Adjust Stock",
     "Create Order",
     "Fulfil Orders",
-    "POS",
-    "Sales Log"
+    "Admin"
 ])
 
-# ---------- ADD INGREDIENT ----------
-if page == "Add Ingredient":
-    st.header("Add Ingredient")
-    name = st.text_input("Ingredient Name")
-    unit = st.text_input("Unit (kg, pcs, L)")
-    par = st.number_input("Par Level", 0.0)
+# ==========================================================
+# 🟢 IPAD BIG BUTTON POS
+# ==========================================================
+if page == "POS":
 
-    if st.button("Add"):
-        if name:
-            try:
-                cur.execute(
-                    "INSERT INTO ingredients (name, unit, par_level) VALUES (?, ?, ?)",
-                    (name, unit, par)
-                )
-                conn.commit()
+    st.title("JAEJU POS (Trailer)")
 
-                ing_id = cur.lastrowid
-                for loc in LOCATIONS:
-                    cur.execute(
-                        "INSERT OR IGNORE INTO stock (ingredient_id, location, qty) VALUES (?, ?, 0)",
-                        (ing_id, loc)
-                    )
-                conn.commit()
+    products = cur.execute("SELECT id, name, price FROM products").fetchall()
 
-                st.success("Ingredient added")
-            except:
-                st.error("Ingredient already exists")
+    cols = st.columns(3)
 
-# ---------- ADD PRODUCT ----------
-if page == "Add Product":
-    st.header("Add Product")
-    name = st.text_input("Product Name")
-    price = st.number_input("Sell Price", 0.0)
+    for i, (pid, name, price) in enumerate(products):
+        with cols[i % 3]:
+            if st.button(f"{name}\n${price:.2f}", use_container_width=True):
+                qty = 1
 
-    if st.button("Add Product"):
-        if name:
-            try:
-                cur.execute(
-                    "INSERT INTO products (name, price) VALUES (?, ?)",
-                    (name, price)
-                )
-                conn.commit()
-                st.success("Product added")
-            except:
-                st.error("Product already exists")
+                recipe = cur.execute("""
+                SELECT ingredient_id, qty_required
+                FROM recipes
+                WHERE product_id = ?
+                """, (pid,)).fetchall()
 
-# ---------- BUILD RECIPE ----------
-if page == "Build Recipe":
-    st.header("Build Recipe")
+                # Stock check
+                for ing_id, qty_required in recipe:
+                    trailer_stock = cur.execute("""
+                    SELECT qty FROM stock
+                    WHERE ingredient_id = ? AND location = 'Trailer'
+                    """, (ing_id,)).fetchone()[0]
 
-    products = cur.execute("SELECT id, name FROM products").fetchall()
-    ingredients = cur.execute("SELECT id, name FROM ingredients").fetchall()
+                    if trailer_stock < qty_required:
+                        st.error(f"Not enough stock for {name}")
+                        break
+                else:
+                    # Deduct
+                    for ing_id, qty_required in recipe:
+                        cur.execute("""
+                        UPDATE stock
+                        SET qty = qty - ?
+                        WHERE ingredient_id = ? AND location = 'Trailer'
+                        """, (qty_required, ing_id))
 
-    if products and ingredients:
-        prod_dict = {name: id for id, name in products}
-        ing_dict = {name: id for id, name in ingredients}
+                    cur.execute("""
+                    INSERT INTO sales (product_id, qty, total, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """, (pid, 1, price, datetime.now().isoformat()))
 
-        selected_product = st.selectbox("Product", list(prod_dict.keys()))
-        selected_ingredient = st.selectbox("Ingredient", list(ing_dict.keys()))
-        qty = st.number_input("Qty per 1 sale", 0.0)
+                    conn.commit()
+                    st.success(f"Sold {name}")
 
-        if st.button("Add/Update"):
-            cur.execute("""
-            INSERT OR REPLACE INTO recipes (product_id, ingredient_id, qty_required)
-            VALUES (?, ?, ?)
-            """, (
-                prod_dict[selected_product],
-                ing_dict[selected_ingredient],
-                qty
-            ))
-            conn.commit()
-            st.success("Recipe updated")
+# ==========================================================
+# 📊 SALES REPORTS
+# ==========================================================
+if page == "Sales Reports":
 
-# ---------- STOCK OVERVIEW ----------
+    st.title("Sales Reports")
+
+    sales_data = cur.execute("""
+    SELECT p.name, s.qty, s.total, s.created_at
+    FROM sales s
+    JOIN products p ON p.id = s.product_id
+    """).fetchall()
+
+    if not sales_data:
+        st.info("No sales yet.")
+    else:
+        df = pd.DataFrame(sales_data, columns=["product", "qty", "total", "created_at"])
+        df["created_at"] = pd.to_datetime(df["created_at"])
+        df["date"] = df["created_at"].dt.date
+
+        selected_date = st.date_input("Select Date", date.today())
+        filtered = df[df["date"] == selected_date]
+
+        col1, col2 = st.columns(2)
+        col1.metric("Total Revenue", f"${filtered['total'].sum():.2f}")
+        col2.metric("Total Items Sold", f"{filtered['qty'].sum():.0f}")
+
+        st.subheader("Revenue by Product")
+        product_summary = filtered.groupby("product")["total"].sum().reset_index()
+        st.dataframe(product_summary, use_container_width=True)
+
+        st.subheader("Transactions")
+        st.dataframe(filtered.sort_values("created_at", ascending=False), use_container_width=True)
+
+# ==========================================================
+# STOCK OVERVIEW
+# ==========================================================
 if page == "Stock Overview":
-    st.header("Stock Overview")
+    st.title("Stock Overview")
+
     location = st.selectbox("Location", LOCATIONS)
 
     data = cur.execute("""
-    SELECT i.id, i.name, s.qty, i.unit, i.par_level
+    SELECT i.name, s.qty, i.unit
     FROM stock s
     JOIN ingredients i ON i.id = s.ingredient_id
     WHERE s.location = ?
     ORDER BY i.name
     """, (location,)).fetchall()
 
-    for ing_id, name, qty, unit, par in data:
-        col1, col2, col3 = st.columns(3)
-        col1.write(name)
-        col2.write(f"{qty} {unit}")
-        if qty < par:
-            col3.error("LOW")
-        else:
-            col3.success("OK")
+    for name, qty, unit in data:
+        st.write(f"{name} — {qty} {unit}")
 
-# ---------- ADJUST STOCK ----------
-if page == "Adjust Stock":
-    st.header("Adjust Stock")
-
-    ingredients = cur.execute("SELECT id, name FROM ingredients").fetchall()
-    ing_dict = {name: id for id, name in ingredients}
-
-    selected = st.selectbox("Ingredient", list(ing_dict.keys()))
-    location = st.selectbox("Location", LOCATIONS)
-    change = st.number_input("Change (+/-)", value=0.0)
-
-    if st.button("Apply"):
-        cur.execute("""
-        UPDATE stock
-        SET qty = qty + ?
-        WHERE ingredient_id = ? AND location = ?
-        """, (change, ing_dict[selected], location))
-        conn.commit()
-        st.success("Stock updated")
-
-# ---------- CREATE ORDER ----------
+# ==========================================================
+# CREATE ORDER
+# ==========================================================
 if page == "Create Order":
-    st.header("Create Order (Trailer → Prep)")
+    st.title("Create Order (Trailer → Prep)")
 
     ingredients = cur.execute("SELECT id, name FROM ingredients").fetchall()
     ing_dict = {name: id for id, name in ingredients}
 
     selected = st.selectbox("Ingredient", list(ing_dict.keys()))
-    qty = st.number_input("Quantity Needed", 0.0)
+    qty = st.number_input("Quantity", 0.0)
 
     if st.button("Create Order"):
         cur.execute("""
@@ -215,9 +202,11 @@ if page == "Create Order":
         conn.commit()
         st.success("Order created")
 
-# ---------- FULFIL ORDERS ----------
+# ==========================================================
+# FULFIL ORDERS
+# ==========================================================
 if page == "Fulfil Orders":
-    st.header("Pending Orders")
+    st.title("Pending Orders")
 
     orders = cur.execute("""
     SELECT o.id, i.name, o.qty, o.ingredient_id
@@ -227,19 +216,18 @@ if page == "Fulfil Orders":
     """).fetchall()
 
     for order_id, name, qty, ing_id in orders:
-        col1, col2, col3 = st.columns([3,1,1])
+        col1, col2 = st.columns([3,1])
         col1.write(f"{name} - {qty}")
 
-        if col3.button("Fulfil", key=f"fulfil_{order_id}"):
+        if col2.button("Fulfil", key=f"f_{order_id}"):
 
-            # Check prep stock first
             prep_stock = cur.execute("""
             SELECT qty FROM stock
             WHERE ingredient_id = ? AND location = 'Prep Kitchen'
             """, (ing_id,)).fetchone()[0]
 
             if prep_stock < qty:
-                st.error("Not enough stock in Prep Kitchen")
+                st.error("Not enough Prep stock")
             else:
                 cur.execute("""
                 UPDATE stock SET qty = qty - ?
@@ -259,64 +247,10 @@ if page == "Fulfil Orders":
                 conn.commit()
                 st.success("Order fulfilled")
 
-# ---------- POS ----------
-if page == "POS":
-    st.header("POS (Trailer)")
+# ==========================================================
+# ADMIN PAGE
+# ==========================================================
+if page == "Admin":
+    st.title("Admin Tools")
 
-    products = cur.execute("SELECT id, name, price FROM products").fetchall()
-
-    for pid, name, price in products:
-        col1, col2, col3 = st.columns([3,1,1])
-        col1.write(f"{name} - ${price:.2f}")
-        qty = col2.number_input("Qty", min_value=0, value=1, key=f"qty_{pid}")
-
-        if col3.button("Sell", key=f"sell_{pid}"):
-
-            recipe = cur.execute("""
-            SELECT ingredient_id, qty_required
-            FROM recipes
-            WHERE product_id = ?
-            """, (pid,)).fetchall()
-
-            # Check stock first
-            for ing_id, qty_required in recipe:
-                trailer_stock = cur.execute("""
-                SELECT qty FROM stock
-                WHERE ingredient_id = ? AND location = 'Trailer'
-                """, (ing_id,)).fetchone()[0]
-
-                if trailer_stock < qty_required * qty:
-                    st.error("Not enough stock in Trailer")
-                    break
-            else:
-                # Deduct
-                for ing_id, qty_required in recipe:
-                    cur.execute("""
-                    UPDATE stock
-                    SET qty = qty - ?
-                    WHERE ingredient_id = ? AND location = 'Trailer'
-                    """, (qty_required * qty, ing_id))
-
-                total = qty * price
-
-                cur.execute("""
-                INSERT INTO sales (product_id, qty, total, created_at)
-                VALUES (?, ?, ?, ?)
-                """, (pid, qty, total, datetime.now().isoformat()))
-
-                conn.commit()
-                st.success(f"Sold {qty} {name}")
-
-# ---------- SALES LOG ----------
-if page == "Sales Log":
-    st.header("Sales Log")
-
-    data = cur.execute("""
-    SELECT p.name, s.qty, s.total, s.created_at
-    FROM sales s
-    JOIN products p ON p.id = s.product_id
-    ORDER BY s.id DESC
-    """).fetchall()
-
-    for name, qty, total, time in data:
-        st.write(f"{time} | {name} x{qty} | ${total:.2f}")
+    st.write("Use previous version for adding ingredients, products, recipes.")

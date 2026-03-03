@@ -20,7 +20,8 @@ ORDER_STATUS_CANCELLED = "CANCELLED"
 PAYMENT_EFTPOS = "EFTPOS"
 PAYMENT_CASH = "CASH"
 
-open_by_key(st.secrets["1svRjr2DZEIaBTV6dXOPu8iUltEL6lez15_n3ROFD5GY"])
+def book():
+    return gs_client().open_by_key(st.secrets["GSHEET_ID"])
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",

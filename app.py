@@ -63,20 +63,21 @@ def _truthy_1(x) -> int:
 # ---------------------------
 # GOOGLE SHEETS CLIENT
 # ---------------------------
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+
 @st.cache_resource
 def gs_client():
-    # Expects Streamlit Secrets:
-    # [gcp_service_account] ... service account fields ...
     creds = Credentials.from_service_account_info(
         st.secrets["gcp_service_account"],
         scopes=SCOPES,
     )
     return gspread.authorize(creds)
 
-
-@st.cache_resource
 def book():
-    return gs_client().open(SHEET_NAME)
+    return gs_client().open_by_key(st.secrets["GSHEET_ID"])
 
 
 def ws(tab: str):

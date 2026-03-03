@@ -40,7 +40,7 @@ def init_db():
     with get_conn() as conn:
         cur = conn.cursor()
 
-        # Core inventory
+        # Inventory
         cur.execute("""
         CREATE TABLE IF NOT EXISTS items (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -51,7 +51,6 @@ def init_db():
             active INTEGER DEFAULT 1
         );
         """)
-
         cur.execute("""
         CREATE TABLE IF NOT EXISTS stock (
             item_id INTEGER NOT NULL,
@@ -61,29 +60,6 @@ def init_db():
             FOREIGN KEY (item_id) REFERENCES items(id)
         );
         """)
-
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS orders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            created_at TEXT NOT NULL,
-            from_location TEXT NOT NULL,
-            to_location TEXT NOT NULL,
-            status TEXT NOT NULL,
-            note TEXT
-        );
-        """)
-
-        cur.execute("""
-        CREATE TABLE IF NOT EXISTS order_lines (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            order_id INTEGER NOT NULL,
-            item_id INTEGER NOT NULL,
-            qty REAL NOT NULL,
-            FOREIGN KEY (order_id) REFERENCES orders(id),
-            FOREIGN KEY (item_id) REFERENCES items(id)
-        );
-        """)
-
         cur.execute("""
         CREATE TABLE IF NOT EXISTS movements (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -98,7 +74,29 @@ def init_db():
         );
         """)
 
-        # POS sales
+        # Orders: Truck -> Prep
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at TEXT NOT NULL,
+            from_location TEXT NOT NULL,
+            to_location TEXT NOT NULL,
+            status TEXT NOT NULL,
+            note TEXT
+        );
+        """)
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS order_lines (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            order_id INTEGER NOT NULL,
+            item_id INTEGER NOT NULL,
+            qty REAL NOT NULL,
+            FOREIGN KEY (order_id) REFERENCES orders(id),
+            FOREIGN KEY (item_id) REFERENCES items(id)
+        );
+        """)
+
+        # Sales (POS)
         cur.execute("""
         CREATE TABLE IF NOT EXISTS sales (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -108,7 +106,6 @@ def init_db():
             note TEXT
         );
         """)
-
         cur.execute("""
         CREATE TABLE IF NOT EXISTS sale_lines (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -123,7 +120,7 @@ def init_db():
         );
         """)
 
-        # Menu + recipes (editable in-app)
+        # Menu (editable in-app)
         cur.execute("""
         CREATE TABLE IF NOT EXISTS menu_items (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -134,7 +131,6 @@ def init_db():
             sort_order INTEGER NOT NULL DEFAULT 0
         );
         """)
-
         cur.execute("""
         CREATE TABLE IF NOT EXISTS menu_recipes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -146,7 +142,6 @@ def init_db():
             FOREIGN KEY (item_id) REFERENCES items(id)
         );
         """)
-
         conn.commit()
 
 
@@ -168,7 +163,6 @@ def get_items_df(active_only=True):
         return pd.read_sql_query(q, conn)
 
 
-# Upsert items (avoids UNIQUE crash)
 def add_item(name: str, unit: str, par_level: float, price_nzd: float, active: int = 1):
     name = name.strip()
     if not name:
@@ -178,7 +172,6 @@ def add_item(name: str, unit: str, par_level: float, price_nzd: float, active: i
         cur = conn.cursor()
         cur.execute("SELECT id FROM items WHERE name = ?", (name,))
         row = cur.fetchone()
-
         if row:
             item_id = int(row["id"])
             cur.execute("""
@@ -186,14 +179,13 @@ def add_item(name: str, unit: str, par_level: float, price_nzd: float, active: i
                 SET unit = ?, par_level = ?, price_nzd = ?, active = ?
                 WHERE id = ?
             """, (unit, par_level, price_nzd, active, item_id))
-            conn.commit()
         else:
             cur.execute("""
                 INSERT INTO items(name, unit, par_level, price_nzd, active)
                 VALUES (?, ?, ?, ?, ?)
             """, (name, unit, par_level, price_nzd, active))
             item_id = cur.lastrowid
-            conn.commit()
+        conn.commit()
 
     ensure_stock_rows_for_item(item_id)
 
@@ -227,15 +219,13 @@ def adjust_stock(item_id: int, location: str, delta: float, reason: str, ref_typ
 
 def get_stock_df():
     with get_conn() as conn:
-        q = """
-        SELECT i.id AS item_id, i.name, i.unit, i.par_level,
-               s.location, s.qty
-        FROM stock s
-        JOIN items i ON i.id = s.item_id
-        WHERE i.active = 1
-        ORDER BY i.name COLLATE NOCASE, s.location
-        """
-        return pd.read_sql_query(q, conn)
+        return pd.read_sql_query("""
+            SELECT i.id AS item_id, i.name, i.unit, i.par_level, s.location, s.qty
+            FROM stock s
+            JOIN items i ON i.id = s.item_id
+            WHERE i.active = 1
+            ORDER BY i.name COLLATE NOCASE, s.location
+        """, conn)
 
 
 def get_stock_pivot():
@@ -255,9 +245,9 @@ def get_stock_pivot():
     return pivot
 
 
-# ----------------------------
+# ---------------------------
 # Orders
-# ----------------------------
+# ---------------------------
 def create_order(note: str = "") -> int:
     with get_conn() as conn:
         cur = conn.cursor()
@@ -320,7 +310,6 @@ def fulfill_order(order_id: int):
         if row["status"] != ORDER_STATUS_PENDING:
             raise ValueError(f"Order must be PENDING to fulfill (currently {row['status']}).")
 
-    # Check prep stock
     prep = get_stock_df()
     prep_map = {int(r["item_id"]): float(r["qty"]) for _, r in prep.iterrows() if r["location"] == LOC_PREP}
 
@@ -330,7 +319,6 @@ def fulfill_order(order_id: int):
         if prep_map.get(item_id, 0.0) < qty:
             raise ValueError(f"Not enough Prep stock for {line['name']} (have {prep_map.get(item_id, 0.0)}, need {qty})")
 
-    # Move stock
     for _, line in lines.iterrows():
         item_id = int(line["item_id"])
         qty = float(line["qty"])
@@ -351,14 +339,10 @@ def get_movements_df(limit=300):
         """, conn, params=(limit,))
 
 
-# ----------------------------
-# Menu DB (editable)
-# ----------------------------
+# ---------------------------
+# Menu (editable)
+# ---------------------------
 def seed_menu_if_empty():
-    """
-    Creates some starter menu items if menu_items is empty.
-    You can delete/rename/edit these in Menu Admin.
-    """
     with get_conn() as conn:
         cur = conn.cursor()
         cur.execute("SELECT COUNT(*) AS c FROM menu_items")
@@ -393,14 +377,13 @@ def upsert_menu_items(df: pd.DataFrame):
     with get_conn() as conn:
         cur = conn.cursor()
         for _, r in df.iterrows():
-            sku = str(r["sku"]).strip()
-            name = str(r["name"]).strip()
-            price = float(r["price"])
-            active = int(r["active"])
-            sort_order = int(r.get("sort_order", 0))
-
+            sku = str(r.get("sku", "")).strip()
+            name = str(r.get("name", "")).strip()
             if not sku or not name:
                 continue
+            price = float(r.get("price", 0.0))
+            active = int(r.get("active", 1))
+            sort_order = int(r.get("sort_order", 0))
 
             if pd.isna(r.get("id")):
                 cur.execute("""
@@ -428,14 +411,9 @@ def get_menu_recipe(menu_id: int):
 
 
 def upsert_menu_recipe(menu_id: int, df: pd.DataFrame):
-    """
-    df columns: id(optional), item_id, qty
-    Enforces unique (menu_id,item_id).
-    """
     with get_conn() as conn:
         cur = conn.cursor()
-
-        # Remove rows that are deleted in editor: easiest is to wipe and re-insert
+        # simplest reliable approach: wipe + reinsert
         cur.execute("DELETE FROM menu_recipes WHERE menu_id = ?", (menu_id,))
         conn.commit()
 
@@ -454,9 +432,18 @@ def upsert_menu_recipe(menu_id: int, df: pd.DataFrame):
         conn.commit()
 
 
-# ----------------------------
+def get_recipe_map(menu_id: int):
+    with get_conn() as conn:
+        df = pd.read_sql_query(
+            "SELECT item_id, qty FROM menu_recipes WHERE menu_id = ?",
+            conn, params=(menu_id,)
+        )
+    return {int(r["item_id"]): float(r["qty"]) for _, r in df.iterrows()}
+
+
+# ---------------------------
 # POS
-# ----------------------------
+# ---------------------------
 def create_sale(payment_method: str, note: str = "") -> int:
     with get_conn() as conn:
         cur = conn.cursor()
@@ -502,18 +489,6 @@ def get_today_sales_summary():
     return pay, lines
 
 
-def get_recipe_map(menu_id: int):
-    """
-    Returns dict item_id -> qty_per_menu_unit
-    """
-    with get_conn() as conn:
-        df = pd.read_sql_query(
-            "SELECT item_id, qty FROM menu_recipes WHERE menu_id = ?",
-            conn, params=(menu_id,)
-        )
-    return {int(r["item_id"]): float(r["qty"]) for _, r in df.iterrows()}
-
-
 def record_pos_sale(menu_row: pd.Series, qty: float, payment_method: str, note: str = ""):
     if qty <= 0:
         raise ValueError("Qty must be > 0.")
@@ -527,11 +502,9 @@ def record_pos_sale(menu_row: pd.Series, qty: float, payment_method: str, note: 
     if not recipe:
         raise ValueError("This menu item has no recipe yet. Add it in Menu Admin.")
 
-    # Create sale + line
     sale_id = create_sale(payment_method=payment_method, note=note)
     add_sale_line(sale_id, menu_id, sku, name, float(qty), price)
 
-    # Deduct from TRUCK
     for item_id, per_unit in recipe.items():
         total_used = float(per_unit) * float(qty)
         adjust_stock(
@@ -542,23 +515,15 @@ def record_pos_sale(menu_row: pd.Series, qty: float, payment_method: str, note: 
             ref_type="sale",
             ref_id=sale_id,
         )
-
     return sale_id
 
 
-# ----------------------------
-# Event Forecast (Revenue + mix -> qty -> ingredients)
-# ----------------------------
+# ---------------------------
+# Event Mode
+# ---------------------------
 def forecast_from_revenue(revenue_nzd: float, mix: dict, menu_df: pd.DataFrame):
-    """
-    mix: menu_id -> share (0..1)
-    Uses qty_sold = revenue*share / price, then ingredients = sum(qty_sold*recipe).
-    """
     revenue_nzd = float(revenue_nzd)
-    menu_df = menu_df.copy()
-    menu_df["price"] = menu_df["price"].astype(float)
 
-    # Estimate quantities sold per menu item
     qty_rows = []
     for mid, share in mix.items():
         row = menu_df.loc[menu_df["id"] == mid]
@@ -570,7 +535,6 @@ def forecast_from_revenue(revenue_nzd: float, mix: dict, menu_df: pd.DataFrame):
         qty_est = (revenue_nzd * float(share)) / price
         qty_rows.append((mid, qty_est))
 
-    # Ingredients aggregation by item_id
     ing_totals = {}
     for mid, qty_est in qty_rows:
         recipe = get_recipe_map(int(mid))
@@ -580,379 +544,430 @@ def forecast_from_revenue(revenue_nzd: float, mix: dict, menu_df: pd.DataFrame):
     return qty_rows, ing_totals
 
 
-def ensure_order_df():
-    if "order_df" not in st.session_state:
-        st.session_state["order_df"] = pd.DataFrame([{"Item": "", "Qty": 0.0}], columns=["Item", "Qty"])
+# ---------------------------
+# Mobile-friendly Orders draft state
+# ---------------------------
+def ensure_order_lines_state():
+    if "order_lines" not in st.session_state:
+        st.session_state["order_lines"] = []  # list[{"Item": str, "Qty": float}]
 
 
-def set_order_df_from_item_totals(item_totals_by_name: dict):
-    rows = [{"Item": k, "Qty": float(v)} for k, v in item_totals_by_name.items() if float(v) > 0]
-    if not rows:
-        rows = [{"Item": "", "Qty": 0.0}]
-    st.session_state["order_df"] = pd.DataFrame(rows, columns=["Item", "Qty"]).sort_values("Item", ignore_index=True)
+def add_to_order_draft(item_name: str, qty: float):
+    ensure_order_lines_state()
+    if qty <= 0:
+        return
+    found = False
+    for line in st.session_state["order_lines"]:
+        if line["Item"] == item_name:
+            line["Qty"] = float(line["Qty"]) + float(qty)
+            found = True
+            break
+    if not found:
+        st.session_state["order_lines"].append({"Item": item_name, "Qty": float(qty)})
 
 
-# ----------------------------
-# App UI
-# ----------------------------
+def set_order_draft_from_name_totals(name_totals: dict):
+    ensure_order_lines_state()
+    st.session_state["order_lines"] = [
+        {"Item": k, "Qty": float(v)} for k, v in name_totals.items() if float(v) > 0
+    ]
+
+
+# ---------------------------
+# APP UI
+# ---------------------------
 st.set_page_config(page_title="JAEJU Ops", page_icon="jaeju-logo.jpg", layout="wide")
 init_db()
 seed_menu_if_empty()
 
 st.title("JAEJU Stock + POS + Events")
 
-tabs = st.tabs(["POS", "Event Mode", "Menu Admin", "Dashboard", "Items", "Adjust Stock", "Orders", "Movements"])
+# Mobile mode: dropdown navigation is easier than tabs
+mobile_mode = st.toggle("Mobile mode", value=True)
 
-# ---- POS ----
-with tabs[0]:
-    st.subheader("POS (Food Truck)")
+PAGES = ["POS", "Event Mode", "Orders", "Dashboard", "Adjust Stock", "Menu Admin", "Items", "Movements"]
+if mobile_mode:
+    page = st.selectbox("Go to", PAGES)
+else:
+    tabs = st.tabs(PAGES)
+    page = None
 
-    menu = get_menu_items(active_only=True)
-    if menu.empty:
-        st.warning("No active menu items. Go to Menu Admin.")
-    else:
-        names = menu["name"].tolist()
-        chosen_name = st.selectbox("Menu item", names)
-        chosen = menu.loc[menu["name"] == chosen_name].iloc[0]
 
-        c1, c2, c3 = st.columns([1, 1, 1])
-        qty = c1.number_input("Qty", min_value=1.0, value=1.0, step=1.0)
-        pay = c2.selectbox("Payment", [PAYMENT_EFTPOS, PAYMENT_CASH])
-        note = c3.text_input("Note (optional)", placeholder="comp / staff meal")
+def on_page(name: str) -> bool:
+    if mobile_mode:
+        return page == name
+    # tab index
+    idx = PAGES.index(name)
+    return True if tabs[idx] else False
 
-        b1, b2 = st.columns(2)
-        if b1.button("Sell x1", type="primary"):
-            try:
-                sale_id = record_pos_sale(chosen, 1, pay, note)
-                st.success(f"Sale #{sale_id} recorded. Stock deducted from Food Truck.")
-                st.rerun()
-            except Exception as e:
-                st.error(str(e))
 
-        if b2.button("Sell qty"):
-            try:
-                sale_id = record_pos_sale(chosen, float(qty), pay, note)
-                st.success(f"Sale #{sale_id} recorded. Stock deducted from Food Truck.")
-                st.rerun()
-            except Exception as e:
-                st.error(str(e))
+# -------- POS --------
+if (mobile_mode and page == "POS") or (not mobile_mode and True):
+    container = st.container() if mobile_mode else tabs[PAGES.index("POS")]
+    with container:
+        st.subheader("POS (one-tap buttons)")
 
-    st.divider()
-    st.subheader("Today")
-    pay_summary, item_summary = get_today_sales_summary()
-    total_today = float(pay_summary["total"].sum()) if not pay_summary.empty else 0.0
-    st.metric("Total", f"${total_today:,.2f}")
-    if not item_summary.empty:
-        st.dataframe(item_summary, use_container_width=True, hide_index=True)
-    else:
-        st.info("No sales recorded today yet.")
-
-# ---- Event Mode ----
-with tabs[1]:
-    st.subheader("Event Mode (Revenue → Ingredients → Draft Order + Load Sheet)")
-
-    menu = get_menu_items(active_only=True)
-    if menu.empty:
-        st.warning("No active menu items. Add them in Menu Admin.")
-    else:
-        event_name = st.text_input("Event name", placeholder="Electric Ave Day 1")
-        revenue = st.number_input("Target revenue (NZD)", min_value=0.0, value=10000.0, step=500.0)
-        buffer_pct = st.number_input("Safety buffer (%)", min_value=0.0, value=10.0, step=1.0)
-
-        st.markdown("### Menu mix")
-        mix = {}
-        total = 0.0
-        for _, r in menu.iterrows():
-            key = int(r["id"])
-            default = int(100 / max(len(menu), 1))
-            val = st.slider(f"{r['name']} share (%)", 0, 100, default)
-            mix[key] = float(val)
-            total += float(val)
-
-        if total <= 0:
-            st.warning("Set at least one menu share above 0%.")
+        menu = get_menu_items(active_only=True)
+        if menu.empty:
+            st.warning("No active menu items. Go to Menu Admin.")
         else:
-            # normalize
-            mix_norm = {k: v / total for k, v in mix.items() if v > 0}
+            pay = st.segmented_control("Payment", [PAYMENT_EFTPOS, PAYMENT_CASH], default=PAYMENT_EFTPOS)
+            qty_mode = st.toggle("Qty mode (sell more than 1)", value=False)
+            qty = 1.0
+            if qty_mode:
+                qty = st.number_input("Qty", min_value=1.0, value=1.0, step=1.0)
 
-            qty_rows, ing_totals = forecast_from_revenue(revenue, mix_norm, menu)
+            # Big buttons grid (2 per row)
+            cols = st.columns(2)
+            for i, (_, r) in enumerate(menu.iterrows()):
+                with cols[i % 2]:
+                    label = f"{r['name']}\n${float(r['price']):.0f}"
+                    if st.button(label, use_container_width=True):
+                        try:
+                            sale_id = record_pos_sale(r, float(qty), pay, "")
+                            st.toast(f"Sold: {r['name']} (#{sale_id})")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(str(e))
 
-            # Apply buffer
-            ing_totals = {k: v * (1.0 + buffer_pct / 100.0) for k, v in ing_totals.items()}
+        st.divider()
+        st.subheader("Today totals")
+        pay_summary, item_summary = get_today_sales_summary()
+        total_today = float(pay_summary["total"].sum()) if not pay_summary.empty else 0.0
+        eftpos_today = float(pay_summary.loc[pay_summary["payment_method"] == PAYMENT_EFTPOS, "total"].sum()) if not pay_summary.empty else 0.0
+        cash_today = float(pay_summary.loc[pay_summary["payment_method"] == PAYMENT_CASH, "total"].sum()) if not pay_summary.empty else 0.0
 
-            # Convert item_id totals to names
-            items = get_items_df(active_only=True)
-            id_to_name = {int(r["id"]): str(r["name"]) for _, r in items.iterrows()}
-            name_totals = {}
-            missing_item_ids = []
-            for item_id, qty_total in ing_totals.items():
-                if item_id in id_to_name:
-                    name_totals[id_to_name[item_id]] = qty_total
-                else:
-                    missing_item_ids.append(item_id)
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Total", f"${total_today:,.2f}")
+        c2.metric("EFTPOS", f"${eftpos_today:,.2f}")
+        c3.metric("Cash", f"${cash_today:,.2f}")
 
-            st.markdown("### Estimated quantities sold")
-            qty_view = []
-            for mid, qty_est in qty_rows:
-                row = menu.loc[menu["id"] == mid].iloc[0]
-                qty_view.append({"Menu item": row["name"], "Qty (est)": round(float(qty_est), 1), "Price": float(row["price"])})
-            st.dataframe(pd.DataFrame(qty_view), use_container_width=True, hide_index=True)
+        if not item_summary.empty:
+            st.dataframe(item_summary, use_container_width=True, hide_index=True)
+        else:
+            st.info("No sales recorded today yet.")
 
-            st.markdown("### Load sheet (ingredients)")
-            load_df = pd.DataFrame(
-                [{"Item": k, "Qty": round(float(v), 2)} for k, v in name_totals.items() if float(v) > 0],
-                columns=["Item", "Qty"]
-            ).sort_values("Item")
-            st.dataframe(load_df, use_container_width=True, hide_index=True)
 
-            st.download_button(
-                "Download load sheet (CSV)",
-                data=load_df.to_csv(index=False).encode("utf-8"),
-                file_name=f"load_sheet_{(event_name or 'event').replace(' ', '_')}.csv",
-                mime="text/csv",
-            )
+# -------- Event Mode --------
+if (mobile_mode and page == "Event Mode") or (not mobile_mode and True):
+    container = st.container() if mobile_mode else tabs[PAGES.index("Event Mode")]
+    with container:
+        st.subheader("Event Mode (Revenue → Ingredients → Draft Order)")
 
-            if st.button("Send to Orders as draft", type="primary"):
-                set_order_df_from_item_totals(name_totals)
-                st.success("Draft created. Go to Orders tab and press Create order.")
+        menu = get_menu_items(active_only=True)
+        if menu.empty:
+            st.warning("No active menu items. Add them in Menu Admin.")
+        else:
+            event_name = st.text_input("Event name", placeholder="Electric Ave Day 1")
+            revenue = st.number_input("Target revenue (NZD)", min_value=0.0, value=10000.0, step=500.0)
+            buffer_pct = st.number_input("Safety buffer (%)", min_value=0.0, value=10.0, step=1.0)
 
-            if missing_item_ids:
-                st.warning("Some recipe ingredient items are not active/missing in Items (item_ids): " + ", ".join(map(str, missing_item_ids)))
+            st.markdown("### Menu mix")
+            mix_raw = {}
+            total = 0.0
+            for _, r in menu.iterrows():
+                mid = int(r["id"])
+                default = int(100 / max(len(menu), 1))
+                val = st.slider(f"{r['name']} (%)", 0, 100, default)
+                mix_raw[mid] = float(val)
+                total += float(val)
 
-# ---- Menu Admin ----
-with tabs[2]:
-    st.subheader("Menu Admin (edit POS menu + recipes inside the app)")
+            if total <= 0:
+                st.warning("Set at least one menu share above 0%.")
+            else:
+                mix = {k: v / total for k, v in mix_raw.items() if v > 0}
 
-    st.info("Step 1: Edit menu items. Step 2: Click a menu item and edit its recipe.")
+                qty_rows, ing_totals = forecast_from_revenue(revenue, mix, menu)
+                ing_totals = {k: v * (1.0 + buffer_pct / 100.0) for k, v in ing_totals.items()}
 
-    menu_df = get_menu_items(active_only=False)
+                items = get_items_df(active_only=True)
+                id_to_name = {int(r["id"]): str(r["name"]) for _, r in items.iterrows()}
 
-    st.markdown("### Menu items")
-    edited_menu = st.data_editor(
-        menu_df,
-        num_rows="dynamic",
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "id": st.column_config.NumberColumn("id", disabled=True),
-            "sku": st.column_config.TextColumn("sku"),
-            "name": st.column_config.TextColumn("name"),
-            "price": st.column_config.NumberColumn("price", min_value=0.0, step=0.5),
-            "active": st.column_config.CheckboxColumn("active"),
-            "sort_order": st.column_config.NumberColumn("sort_order", step=10),
-        },
-        key="menu_editor",
-    )
+                name_totals = {}
+                for item_id, qty_total in ing_totals.items():
+                    if item_id in id_to_name:
+                        name_totals[id_to_name[item_id]] = float(qty_total)
 
-    if st.button("Save menu items", type="primary"):
-        try:
-            upsert_menu_items(edited_menu)
-            st.success("Menu saved.")
-            st.rerun()
-        except Exception as e:
-            st.error(str(e))
+                st.markdown("### Estimated qty sold")
+                qty_view = []
+                for mid, qty_est in qty_rows:
+                    row = menu.loc[menu["id"] == mid].iloc[0]
+                    qty_view.append({"Menu item": row["name"], "Qty (est)": round(float(qty_est), 1), "Price": float(row["price"])})
+                st.dataframe(pd.DataFrame(qty_view), use_container_width=True, hide_index=True)
 
-    st.divider()
-    st.markdown("### Edit recipe for a menu item")
+                st.markdown("### Load sheet (ingredients)")
+                load_df = pd.DataFrame(
+                    [{"Item": k, "Qty": round(float(v), 2)} for k, v in name_totals.items() if float(v) > 0],
+                    columns=["Item", "Qty"]
+                ).sort_values("Item")
+                st.dataframe(load_df, use_container_width=True, hide_index=True)
 
-    menu_active = get_menu_items(active_only=False)
-    if menu_active.empty:
-        st.warning("No menu items yet.")
-    else:
-        pick = st.selectbox("Choose menu item", menu_active["name"].tolist())
-        picked_row = menu_active.loc[menu_active["name"] == pick].iloc[0]
-        menu_id = int(picked_row["id"])
+                st.download_button(
+                    "Download load sheet (CSV)",
+                    data=load_df.to_csv(index=False).encode("utf-8"),
+                    file_name=f"load_sheet_{(event_name or 'event').replace(' ', '_')}.csv",
+                    mime="text/csv",
+                )
+
+                if st.button("Send to Orders draft", type="primary"):
+                    set_order_draft_from_name_totals(name_totals)
+                    st.success("Draft created. Go to Orders tab and press Create order.")
+
+
+# -------- Orders (mobile-proof) --------
+if (mobile_mode and page == "Orders") or (not mobile_mode and True):
+    container = st.container() if mobile_mode else tabs[PAGES.index("Orders")]
+    with container:
+        st.subheader("Truck → Prep Kitchen Orders (mobile friendly)")
 
         items = get_items_df(active_only=True)
         if items.empty:
-            st.warning("Add ingredient items in Items tab first (e.g., Chicken thigh diced, Flour, etc.).")
+            st.info("Add items first.")
         else:
-            # Current recipe
-            recipe_df = get_menu_recipe(menu_id)
-            # Build editor df: item_id + qty
-            if recipe_df.empty:
-                edit_df = pd.DataFrame([{"item_id": int(items.iloc[0]["id"]), "qty": 0.0}], columns=["item_id", "qty"])
+            item_names = list(items["name"].tolist())
+            ensure_order_lines_state()
+
+            note = st.text_input("Order note (optional)", placeholder="Friday top-up / Event name")
+
+            st.markdown("### Add to order")
+            c1, c2, c3 = st.columns([2, 1, 1])
+            pick_item = c1.selectbox("Item", item_names, key="order_pick_item")
+            pick_qty = c2.number_input("Qty", min_value=0.0, value=1.0, step=0.5, key="order_pick_qty")
+
+            if c3.button("Add", type="primary"):
+                if pick_qty <= 0:
+                    st.warning("Qty must be > 0")
+                else:
+                    add_to_order_draft(pick_item, float(pick_qty))
+                    st.success("Added.")
+                    st.rerun()
+
+            st.divider()
+            st.markdown("### Draft order")
+
+            if not st.session_state["order_lines"]:
+                st.info("No items in the draft yet.")
             else:
-                edit_df = recipe_df[["item_id", "qty"]].copy()
+                df = pd.DataFrame(st.session_state["order_lines"])
+                edited = st.data_editor(
+                    df,
+                    num_rows="dynamic",
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Item": st.column_config.SelectboxColumn("Item", options=item_names),
+                        "Qty": st.column_config.NumberColumn("Qty", min_value=0.0, step=0.5),
+                    },
+                    key="order_lines_editor",
+                )
+                edited["Item"] = edited["Item"].fillna("").astype(str)
+                edited["Qty"] = edited["Qty"].fillna(0).astype(float)
+                edited = edited[(edited["Item"].str.strip() != "") & (edited["Qty"] > 0)]
+                st.session_state["order_lines"] = edited.to_dict(orient="records")
 
-            id_to_name = {int(r["id"]): str(r["name"]) for _, r in items.iterrows()}
-            options = list(id_to_name.keys())
+                c1, c2 = st.columns([1, 2])
+                if c1.button("Clear draft"):
+                    st.session_state["order_lines"] = []
+                    st.rerun()
 
-            st.markdown("Add ingredient lines (per 1 menu item sold). Example: Chicken thigh diced = 0.30 (kg)")
-            edited_recipe = st.data_editor(
-                edit_df,
-                num_rows="dynamic",
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "item_id": st.column_config.SelectboxColumn("Ingredient item", options=options, format_func=lambda x: id_to_name.get(int(x), str(x))),
-                    "qty": st.column_config.NumberColumn("Qty per sale", step=0.01),
-                },
-                key="recipe_editor",
-            )
+                if c2.button("Create order", type="primary"):
+                    try:
+                        if not st.session_state["order_lines"]:
+                            raise ValueError("Add at least one item to the draft.")
+                        order_id = create_order(note=note)
+                        for line in st.session_state["order_lines"]:
+                            item_id = get_item_id_by_name(line["Item"])
+                            if not item_id:
+                                raise ValueError(f"Item not found/active: {line['Item']}")
+                            add_order_line(order_id, int(item_id), float(line["Qty"]))
+                        st.success(f"Order #{order_id} created (PENDING).")
+                        st.session_state["order_lines"] = []
+                        st.rerun()
+                    except Exception as e:
+                        st.error(str(e))
 
-            if st.button("Save recipe", type="primary"):
+        st.divider()
+        st.subheader("Manage orders")
+        orders = get_orders_df()
+        if orders.empty:
+            st.info("No orders yet.")
+        else:
+            st.dataframe(orders, use_container_width=True, hide_index=True)
+            order_id = st.number_input("Order ID", min_value=1, step=1, value=int(orders.iloc[0]["id"]))
+            lines = get_order_lines_df(int(order_id))
+            if not lines.empty:
+                st.dataframe(lines[["name", "unit", "qty"]], use_container_width=True, hide_index=True)
+
+            c1, c2 = st.columns(2)
+            if c1.button("Fulfill (Prep → Truck)", type="primary"):
                 try:
-                    upsert_menu_recipe(menu_id, edited_recipe)
-                    st.success("Recipe saved.")
+                    fulfill_order(int(order_id))
+                    st.success("Fulfilled. Stock moved Prep → Truck.")
                     st.rerun()
                 except Exception as e:
                     st.error(str(e))
 
-# ---- Dashboard ----
-with tabs[3]:
-    st.subheader("Stock snapshot")
-    pivot = get_stock_pivot()
-    if pivot.empty:
-        st.info("No items yet. Add items in Items tab.")
-    else:
-        st.dataframe(
-            pivot[["name", "unit", "par_level", LOC_TRUCK, LOC_PREP, "Below PAR?"]],
-            use_container_width=True,
-            hide_index=True
-        )
-
-# ---- Items ----
-with tabs[4]:
-    st.subheader("Items")
-    with st.expander("Add / Update item", expanded=True):
-        c1, c2, c3, c4 = st.columns([2, 1, 1, 1])
-        name = c1.text_input("Item name", placeholder="Chicken thigh diced")
-        unit = c2.text_input("Unit", placeholder="kg / pcs / L")
-        par = c3.number_input("PAR level (Prep)", min_value=0.0, value=0.0, step=0.5)
-        price = c4.number_input("Price NZD (optional)", min_value=0.0, value=0.0, step=0.1)
-
-        if st.button("Save item", type="primary"):
-            try:
-                add_item(name=name, unit=unit.strip() or "unit", par_level=float(par), price_nzd=float(price))
-                st.success("Saved.")
+            if c2.button("Cancel order"):
+                set_order_status(int(order_id), ORDER_STATUS_CANCELLED)
+                st.success("Cancelled.")
                 st.rerun()
-            except Exception as e:
-                st.error(str(e))
 
-    items_df = get_items_df(active_only=False)
-    if not items_df.empty:
-        st.dataframe(items_df, use_container_width=True, hide_index=True)
 
-# ---- Adjust stock ----
-with tabs[5]:
-    st.subheader("Adjust stock")
-    items = get_items_df(active_only=True)
-    if items.empty:
-        st.info("Add items first.")
-    else:
-        item_map = dict(zip(items["name"], items["id"]))
+# -------- Dashboard --------
+if (mobile_mode and page == "Dashboard") or (not mobile_mode and True):
+    container = st.container() if mobile_mode else tabs[PAGES.index("Dashboard")]
+    with container:
+        st.subheader("Stock snapshot")
+        pivot = get_stock_pivot()
+        if pivot.empty:
+            st.info("No items yet. Add items in Items tab.")
+        else:
+            st.dataframe(
+                pivot[["name", "unit", "par_level", LOC_TRUCK, LOC_PREP, "Below PAR?"]],
+                use_container_width=True,
+                hide_index=True
+            )
 
-        c1, c2, c3, c4 = st.columns([2, 1, 1, 2])
-        item_name = c1.selectbox("Item", list(item_map.keys()))
-        location = c2.selectbox("Location", LOCATIONS)
-        delta = c3.number_input("Delta (+ add / - remove)", value=0.0, step=0.5)
-        reason = c4.text_input("Reason", placeholder="delivery / wastage / recount")
 
-        if st.button("Apply adjustment", type="primary"):
-            try:
-                adjust_stock(int(item_map[item_name]), location, float(delta),
-                             reason=reason.strip() or "Manual adjustment",
-                             ref_type="manual", ref_id=None)
-                st.success("Stock updated.")
-                st.rerun()
-            except Exception as e:
-                st.error(str(e))
+# -------- Adjust Stock --------
+if (mobile_mode and page == "Adjust Stock") or (not mobile_mode and True):
+    container = st.container() if mobile_mode else tabs[PAGES.index("Adjust Stock")]
+    with container:
+        st.subheader("Adjust stock (counts, wastage, deliveries)")
+        items = get_items_df(active_only=True)
+        if items.empty:
+            st.info("Add items first.")
+        else:
+            item_map = dict(zip(items["name"], items["id"]))
 
-# ---- Orders ----
-with tabs[6]:
-    st.subheader("Truck → Prep Kitchen orders (multi-line)")
+            item_name = st.selectbox("Item", list(item_map.keys()))
+            location = st.selectbox("Location", LOCATIONS)
+            delta = st.number_input("Delta (+ add / - remove)", value=0.0, step=0.5)
+            reason = st.text_input("Reason", placeholder="delivery / wastage / recount")
 
-    items = get_items_df(active_only=True)
-    if items.empty:
-        st.info("Add items first.")
-    else:
-        item_names = list(items["name"].tolist())
-        ensure_order_df()
+            if st.button("Apply adjustment", type="primary"):
+                try:
+                    adjust_stock(int(item_map[item_name]), location, float(delta),
+                                 reason=reason.strip() or "Manual adjustment",
+                                 ref_type="manual", ref_id=None)
+                    st.success("Stock updated.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(str(e))
 
-        note = st.text_input("Order note (optional)", placeholder="Friday top-up / Event name")
 
-        edited = st.data_editor(
-            st.session_state["order_df"],
+# -------- Menu Admin --------
+if (mobile_mode and page == "Menu Admin") or (not mobile_mode and True):
+    container = st.container() if mobile_mode else tabs[PAGES.index("Menu Admin")]
+    with container:
+        st.subheader("Menu Admin (edit menu + recipes)")
+
+        st.info("Tip: Do this on a laptop if possible. Mobile works, but it’s slower.")
+
+        menu_df = get_menu_items(active_only=False)
+        st.markdown("### Menu items")
+        edited_menu = st.data_editor(
+            menu_df,
             num_rows="dynamic",
             use_container_width=True,
             hide_index=True,
             column_config={
-                "Item": st.column_config.SelectboxColumn("Item", options=item_names),
-                "Qty": st.column_config.NumberColumn("Qty", min_value=0.0, step=0.5),
+                "id": st.column_config.NumberColumn("id", disabled=True),
+                "sku": st.column_config.TextColumn("sku"),
+                "name": st.column_config.TextColumn("name"),
+                "price": st.column_config.NumberColumn("price", min_value=0.0, step=0.5),
+                "active": st.column_config.CheckboxColumn("active"),
+                "sort_order": st.column_config.NumberColumn("sort_order", step=10),
             },
-            key="order_editor",
+            key="menu_editor",
         )
-        st.session_state["order_df"] = edited
-
-        c1, c2, c3 = st.columns([1, 1, 2])
-        if c1.button("Clear draft"):
-            st.session_state["order_df"] = pd.DataFrame([{"Item": "", "Qty": 0.0}], columns=["Item", "Qty"])
-            st.rerun()
-
-        if c2.button("Remove empty/zero lines"):
-            df = st.session_state["order_df"].copy()
-            df["Item"] = df["Item"].fillna("").astype(str)
-            df["Qty"] = df["Qty"].fillna(0).astype(float)
-            df = df[(df["Item"].str.strip() != "") & (df["Qty"] > 0)]
-            if df.empty:
-                df = pd.DataFrame([{"Item": "", "Qty": 0.0}], columns=["Item", "Qty"])
-            st.session_state["order_df"] = df
-            st.rerun()
-
-        if c3.button("Create order", type="primary"):
+        if st.button("Save menu items", type="primary"):
             try:
-                df = st.session_state["order_df"].copy()
-                df["Item"] = df["Item"].fillna("").astype(str)
-                df["Qty"] = df["Qty"].fillna(0).astype(float)
-                df = df[(df["Item"].str.strip() != "") & (df["Qty"] > 0)]
-                if df.empty:
-                    raise ValueError("Add at least one item with Qty > 0.")
-
-                order_id = create_order(note=note)
-                for _, r in df.iterrows():
-                    item_id = get_item_id_by_name(r["Item"])
-                    if not item_id:
-                        raise ValueError(f"Item not found/active: {r['Item']}")
-                    add_order_line(order_id, int(item_id), float(r["Qty"]))
-
-                st.success(f"Order #{order_id} created (PENDING).")
-                st.session_state["order_df"] = pd.DataFrame([{"Item": "", "Qty": 0.0}], columns=["Item", "Qty"])
+                upsert_menu_items(edited_menu)
+                st.success("Menu saved.")
                 st.rerun()
             except Exception as e:
                 st.error(str(e))
 
-    st.divider()
-    st.subheader("Manage orders")
-    orders = get_orders_df()
-    if orders.empty:
-        st.info("No orders yet.")
-    else:
-        st.dataframe(orders, use_container_width=True, hide_index=True)
-        order_id = st.number_input("Order ID", min_value=1, step=1, value=int(orders.iloc[0]["id"]))
-        lines = get_order_lines_df(int(order_id))
-        if not lines.empty:
-            st.dataframe(lines[["name", "unit", "qty"]], use_container_width=True, hide_index=True)
+        st.divider()
+        st.markdown("### Edit recipe (ingredients per 1 sale)")
 
-        c1, c2 = st.columns(2)
-        if c1.button("Fulfill (Prep → Truck)", type="primary"):
-            try:
-                fulfill_order(int(order_id))
-                st.success("Fulfilled. Stock moved Prep → Truck.")
-                st.rerun()
-            except Exception as e:
-                st.error(str(e))
+        menu_all = get_menu_items(active_only=False)
+        if menu_all.empty:
+            st.warning("No menu items yet.")
+        else:
+            pick = st.selectbox("Choose menu item", menu_all["name"].tolist())
+            menu_id = int(menu_all.loc[menu_all["name"] == pick].iloc[0]["id"])
 
-        if c2.button("Cancel order"):
-            set_order_status(int(order_id), ORDER_STATUS_CANCELLED)
-            st.success("Cancelled.")
-            st.rerun()
+            items = get_items_df(active_only=True)
+            if items.empty:
+                st.warning("Add ingredient items in Items tab first.")
+            else:
+                id_to_name = {int(r["id"]): str(r["name"]) for _, r in items.iterrows()}
+                options = list(id_to_name.keys())
 
-# ---- Movements ----
-with tabs[7]:
-    st.subheader("Movements log")
-    mv = get_movements_df()
-    if mv.empty:
-        st.info("No movements yet.")
-    else:
-        st.dataframe(mv, use_container_width=True, hide_index=True)
+                recipe_df = get_menu_recipe(menu_id)
+                if recipe_df.empty:
+                    edit_df = pd.DataFrame([{"item_id": int(items.iloc[0]["id"]), "qty": 0.0}], columns=["item_id", "qty"])
+                else:
+                    edit_df = recipe_df[["item_id", "qty"]].copy()
+
+                edited_recipe = st.data_editor(
+                    edit_df,
+                    num_rows="dynamic",
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "item_id": st.column_config.SelectboxColumn(
+                            "Ingredient item",
+                            options=options,
+                            format_func=lambda x: id_to_name.get(int(x), str(x))
+                        ),
+                        "qty": st.column_config.NumberColumn("Qty per sale", step=0.01),
+                    },
+                    key="recipe_editor",
+                )
+                if st.button("Save recipe", type="primary"):
+                    try:
+                        upsert_menu_recipe(menu_id, edited_recipe)
+                        st.success("Recipe saved.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(str(e))
+
+
+# -------- Items --------
+if (mobile_mode and page == "Items") or (not mobile_mode and True):
+    container = st.container() if mobile_mode else tabs[PAGES.index("Items")]
+    with container:
+        st.subheader("Items")
+
+        with st.expander("Add / Update item", expanded=True):
+            name = st.text_input("Item name", placeholder="Chicken thigh diced")
+            unit = st.text_input("Unit", placeholder="kg / pcs / L")
+            par = st.number_input("PAR level (Prep)", min_value=0.0, value=0.0, step=0.5)
+            price = st.number_input("Price NZD (optional)", min_value=0.0, value=0.0, step=0.1)
+
+            if st.button("Save item", type="primary"):
+                try:
+                    add_item(name=name, unit=unit.strip() or "unit", par_level=float(par), price_nzd=float(price))
+                    st.success("Saved.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(str(e))
+
+        df = get_items_df(active_only=False)
+        if not df.empty:
+            st.dataframe(df, use_container_width=True, hide_index=True)
+
+
+# -------- Movements --------
+if (mobile_mode and page == "Movements") or (not mobile_mode and True):
+    container = st.container() if mobile_mode else tabs[PAGES.index("Movements")]
+    with container:
+        st.subheader("Movements log (audit trail)")
+        mv = get_movements_df()
+        if mv.empty:
+            st.info("No movements yet.")
+        else:
+            st.dataframe(mv, use_container_width=True, hide_index=True)

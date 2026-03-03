@@ -120,6 +120,11 @@ def init_db():
         );
         """)
 
+                # --- DB MIGRATION: ensure menu_id column exists ---
+        cols = [r["name"] for r in cur.execute("PRAGMA table_info(sale_lines);").fetchall()]
+        if "menu_id" not in cols:
+            cur.execute("ALTER TABLE sale_lines ADD COLUMN menu_id INTEGER DEFAULT 0;")
+
         # Menu (editable in-app)
         cur.execute("""
         CREATE TABLE IF NOT EXISTS menu_items (

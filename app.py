@@ -20,7 +20,8 @@ ORDER_STATUS_CANCELLED = "CANCELLED"
 PAYMENT_EFTPOS = "EFTPOS"
 PAYMENT_CASH = "CASH"
 
-SHEET_NAME = "JAEJU_MASTER_DB"
+open_by_key(st.secrets["1svRjr2DZEIaBTV6dXOPu8iUltEL6lez15_n3ROFD5GY"])
+
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",

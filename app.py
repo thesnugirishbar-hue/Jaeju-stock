@@ -69,6 +69,7 @@ page = st.sidebar.radio("Navigate", [
     "Build Recipe",
     "Stock Overview",
     "Adjust Stock",
+    "Transfer stock",
     "POS"
 ])
 
@@ -166,6 +167,34 @@ if page == "Stock Overview":
 
 # ---------- ADJUST STOCK ----------
 if page == "Adjust Stock":
+
+    # ---------- TRANSFER STOCK ----------
+if page == "Transfer Stock":
+    st.header("Transfer From Prep To Trailer")
+
+    ingredients = cur.execute("SELECT id, name FROM ingredients").fetchall()
+    ing_dict = {name: id for id, name in ingredients}
+
+    selected = st.selectbox("Ingredient", list(ing_dict.keys()))
+    qty = st.number_input("Quantity to Move", 0.0)
+
+    if st.button("Transfer"):
+        ing_id = ing_dict[selected]
+
+        cur.execute("""
+        UPDATE stock
+        SET qty = qty - ?
+        WHERE ingredient_id = ? AND location = 'Prep Kitchen'
+        """, (qty, ing_id))
+
+        cur.execute("""
+        UPDATE stock
+        SET qty = qty + ?
+        WHERE ingredient_id = ? AND location = 'Trailer'
+        """, (qty, ing_id))
+
+        conn.commit()
+        st.success(f"Moved {qty} from Prep to Trailer")
     st.header("Adjust Stock")
 
     ingredients = cur.execute("SELECT id, name FROM ingredients").fetchall()

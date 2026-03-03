@@ -274,7 +274,11 @@ def get_movements_df(limit=300):
         return pd.read_sql_query(q, conn, params=(limit,))
 
 
-st.set_page_config(page_title="JAEJU Stock", layout="wide")
+st.set_page_config(
+    page_title="JAEJU Stock",
+    page_icon="jaeju-logo.jpg",
+    layout="wide"
+)
 init_db()
 
 st.title("JAEJU Stock + Orders (Truck ↔ Prep Kitchen)")

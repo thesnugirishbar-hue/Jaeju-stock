@@ -124,15 +124,11 @@ def init_db():
     existing = {w.title for w in b.worksheets()}
     for tab, headers in required.items():
         if tab not in existing:
-            try:
-    w = b.worksheet(tab)  # try to open the tab
-except:
-    w = b.add_worksheet(title=tab, rows="3000", cols="30")  # create if missing
-            w.append_row(headers)
-        else:
-            w = b.worksheet(tab)
-            if not w.row_values(1):
-                w.append_row(headers)
+            for tab in tabs:
+␣␣␣␣try:
+␣␣␣␣␣␣␣␣w = b.worksheet(tab)
+␣␣␣␣except:
+␣␣␣␣␣␣␣␣w = b.add_worksheet(...)
 
 # ---------------------------
 # ITEMS + STOCK

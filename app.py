@@ -213,7 +213,7 @@ def init_db():
 def permission_test_ui():
     with st.expander("🔧 Google Sheets connection test", expanded=False):
         st.write("Service account:", st.secrets["gcp_service_account"].get("client_email", "(missing)"))
-        st.write("Spreadsheet:", SHEET_NAME)
+        st.write("Spreadsheet ID:", st.secrets["GSHEET_ID"])
 
         if st.button("Test: create + delete temp tab"):
             try:

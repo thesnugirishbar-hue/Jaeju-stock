@@ -7,6 +7,47 @@ import gspread
 from google.oauth2.service_account import Credentials
 from gspread.exceptions import APIError
 
+import streamlit as st
+import gspread
+from google.oauth2.service_account import Credentials
+
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+
+@st.cache_resource
+def gs_client():
+    creds = Credentials.from_service_account_info(
+        st.secrets["gcp_service_account"],
+        scopes=SCOPES,
+    )
+    return gspread.authorize(creds)
+
+def open_sheet():
+    # IMPORTANT: use open_by_key (ID), not name
+    sheet_id = st.secrets.get("GSHEET_ID", "")
+    if not sheet_id:
+        raise ValueError("Missing GSHEET_ID in Streamlit Secrets")
+    return gs_client().open_by_key(sheet_id)
+
+def sheets_connection_panel():
+    with st.expander("🔧 Sheets connection", expanded=True):
+        st.write("Service account:", st.secrets["gcp_service_account"].get("client_email", "(missing)"))
+        st.write("GSHEET_ID:", st.secrets.get("GSHEET_ID", "(missing)"))
+
+        if st.button("Test connection now"):
+            try:
+                sh = open_sheet()
+                # tiny read only (doesn't pull whole sheet)
+                tabs = [w.title for w in sh.worksheets()]
+                st.success("✅ Connected")
+                st.write("Tabs:", tabs)
+            except Exception as e:
+                st.error("❌ Not connected")
+                st.exception(e)
+
+sheets_connection_panel()
 # =========================
 # CONFIG
 # =========================

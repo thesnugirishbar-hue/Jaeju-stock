@@ -1,4 +1,3 @@
-# app.py
 from datetime import datetime, date
 import pandas as pd
 import streamlit as st
@@ -6,9 +5,11 @@ import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
 
-# ---------------------------
+# =========================================================
 # CONFIG
-# ---------------------------
+# =========================================================
+st.set_page_config(page_title="JAEJU Ops", page_icon="jaeju-logo.jpg", layout="wide")
+
 LOC_TRUCK = "Food Truck"
 LOC_PREP = "Prep Kitchen"
 LOCATIONS = [LOC_TRUCK, LOC_PREP]
@@ -20,34 +21,40 @@ ORDER_STATUS_CANCELLED = "CANCELLED"
 PAYMENT_EFTPOS = "EFTPOS"
 PAYMENT_CASH = "CASH"
 
-def book():
-    return gs_client().open_by_key(st.secrets["GSHEET_ID"])
-
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
 
-# ---------------------------
+REQUIRED_TABS = {
+    "items": ["id", "name", "unit", "par_level", "price_nzd", "active"],
+    "stock": ["item_id", "location", "qty"],
+    "movements": ["id", "created_at", "item_id", "location", "delta", "reason", "ref_type", "ref_id"],
+    "orders": ["id", "created_at", "from_location", "to_location", "status", "note"],
+    "order_lines": ["id", "order_id", "item_id", "qty"],
+    "sales": ["id", "created_at", "sale_date", "payment_method", "note"],
+    "sale_lines": ["id", "sale_id", "menu_id", "sku", "name", "qty", "unit_price", "line_total"],
+    "menu_items": ["id", "sku", "name", "price", "active", "sort_order"],
+    "menu_recipes": ["id", "menu_id", "item_id", "qty"],
+}
+
+# =========================================================
 # TIME HELPERS
-# ---------------------------
+# =========================================================
 def now_iso():
     return datetime.now().isoformat(timespec="seconds")
-
 
 def today_str():
     return date.today().isoformat()
 
-
-# ---------------------------
-# TYPE HELPERS
-# ---------------------------
+# =========================================================
+# SAFE PARSERS
+# =========================================================
 def _safe_float(x, default=0.0):
     try:
         return float(x)
     except Exception:
         return default
-
 
 def _safe_int(x, default=0):
     try:
@@ -55,61 +62,34 @@ def _safe_int(x, default=0):
     except Exception:
         return default
 
+def _bool01(x):
+    s = str(x).strip().lower()
+    return 1 if s in ["1", "true", "yes", "y"] else 0
 
-def _truthy_1(x) -> int:
-    return 1 if str(x).strip().lower() in ["1", "true", "yes", "y"] else 0
-
-
-# ---------------------------
+# =========================================================
 # GOOGLE SHEETS CLIENT
-# ---------------------------
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
-
+# =========================================================
 @st.cache_resource
 def gs_client():
-    creds = Credentials.from_service_account_info(
-        st.secrets["gcp_service_account"],
-        scopes=SCOPES,
-    )
+    # Accept both "\n" escaped and real newline private_key formats
+    info = dict(st.secrets["gcp_service_account"])
+    if "private_key" in info and isinstance(info["private_key"], str):
+        info["private_key"] = info["private_key"].replace("\\n", "\n")
+    creds = Credentials.from_service_account_info(info, scopes=SCOPES)
     return gspread.authorize(creds)
 
 def book():
-    return gs_client().open_by_key(st.secrets["GSHEET_ID"])
-
+    sheet_id = st.secrets.get("GSHEET_ID")
+    if not sheet_id:
+        raise ValueError("Missing GSHEET_ID in Streamlit Secrets (Manage app → Secrets).")
+    return gs_client().open_by_key(sheet_id)
 
 def ws(tab: str):
     return book().worksheet(tab)
 
-
-# ---------------------------
-# SHEETS "DB" CORE
-# ---------------------------
-def get_or_create_ws(spreadsheet, title: str, rows: int = 3000, cols: int = 30):
-    """Open worksheet if exists, otherwise create it."""
-    try:
-        return spreadsheet.worksheet(title)
-    except Exception:
-        return spreadsheet.add_worksheet(title=title, rows=str(rows), cols=str(cols))
-
-
-def ensure_headers(worksheet, headers: list[str]):
-    """If sheet is empty, write headers. If headers exist, ensure required headers exist (append missing)."""
-    first_row = worksheet.row_values(1)
-    if not first_row:
-        worksheet.append_row(headers, value_input_option="USER_ENTERED")
-        return
-
-    # Append any missing columns at the end
-    missing = [h for h in headers if h not in first_row]
-    if missing:
-        # Update header row in one call
-        new_header = first_row + missing
-        worksheet.update("1:1", [new_header])
-
-
+# =========================================================
+# SHEET HELPERS
+# =========================================================
 def read_df(tab: str) -> pd.DataFrame:
     w = ws(tab)
     values = w.get_all_values()
@@ -120,150 +100,121 @@ def read_df(tab: str) -> pd.DataFrame:
         return pd.DataFrame(columns=header)
     return pd.DataFrame(values[1:], columns=header)
 
+def ensure_headers(tab: str, headers: list[str]):
+    """
+    Ensures header row exists and contains at least the required headers.
+    Never deletes or overwrites existing data.
+    """
+    w = ws(tab)
+    existing = w.row_values(1)
+    if not existing:
+        w.append_row(headers, value_input_option="USER_ENTERED")
+        return
+
+    # If headers missing, append them to the end (non-destructive)
+    missing = [h for h in headers if h not in existing]
+    if missing:
+        new_header = existing + missing
+        w.update("1:1", [new_header])
+
+def get_or_create_ws(spreadsheet, title: str, rows=3000, cols=40):
+    """
+    Returns worksheet if exists, otherwise creates it.
+    """
+    try:
+        return spreadsheet.worksheet(title)
+    except Exception:
+        return spreadsheet.add_worksheet(title=title, rows=str(rows), cols=str(cols))
+
+def init_db():
+    """
+    Ensures all tabs exist + headers are present.
+    Does NOT wipe any data.
+    """
+    b = book()
+    for tab, headers in REQUIRED_TABS.items():
+        w = get_or_create_ws(b, tab, rows=3000, cols=max(40, len(headers) + 10))
+        # ensure header row
+        existing = w.row_values(1)
+        if not existing:
+            w.append_row(headers, value_input_option="USER_ENTERED")
+        else:
+            missing = [h for h in headers if h not in existing]
+            if missing:
+                w.update("1:1", [existing + missing])
 
 def next_id(tab: str) -> int:
-    """Simple incrementing integer IDs stored in the sheet."""
     df = read_df(tab)
     if df.empty or "id" not in df.columns:
         return 1
     ids = df["id"].apply(lambda v: _safe_int(v, 0))
     return int(ids.max()) + 1 if len(ids) else 1
 
-
 def find_row_idx(tab: str, col: str, value: str):
     """
-    Returns 1-based sheet row index (including header row).
-    Data rows start at 2.
+    Returns 1-based row index (including header). Data starts at 2.
     """
     df = read_df(tab)
     if df.empty or col not in df.columns:
         return None
-    col_vals = df[col].astype(str).tolist()
-    for i, v in enumerate(col_vals, start=2):
+    for i, v in enumerate(df[col].astype(str).tolist(), start=2):
         if str(v) == str(value):
             return i
     return None
 
-
 def update_cells(tab: str, row_idx: int, updates: dict):
-    """
-    Update multiple columns in one row.
-    Uses update_cell per column (simple + reliable).
-    """
     w = ws(tab)
     header = w.row_values(1)
     for col, val in updates.items():
         if col not in header:
-            raise ValueError(f"Missing column '{col}' in tab '{tab}'.")
+            # Non-destructive: add missing columns
+            header.append(col)
+            w.update("1:1", [header])
         c = header.index(col) + 1
         w.update_cell(row_idx, c, val)
 
-
-def append_rows(tab: str, rows: list[list]):
-    if not rows:
-        return
-    ws(tab).append_rows(rows, value_input_option="USER_ENTERED")
-
-
-# ---------------------------
-# INIT DB (NEVER WIPES)
-# ---------------------------
-def init_db():
-    """
-    Ensures tabs + headers exist.
-    If a tab doesn't exist, we STOP and tell you to create it manually
-    (avoids add_worksheet permission errors).
-    """
-    b = book()
-    required = {
-        "items": ["id","name","unit","par_level","price_nzd","active"],
-        "stock": ["item_id","location","qty"],
-        "movements": ["id","created_at","item_id","location","delta","reason","ref_type","ref_id"],
-        "orders": ["id","created_at","from_location","to_location","status","note"],
-        "order_lines": ["id","order_id","item_id","qty"],
-        "sales": ["id","created_at","sale_date","payment_method","note"],
-        "sale_lines": ["id","sale_id","menu_id","sku","name","qty","unit_price","line_total"],
-        "menu_items": ["id","sku","name","price","active","sort_order"],
-        "menu_recipes": ["id","menu_id","item_id","qty"],
-    }
-
-    existing = {w.title for w in b.worksheets()}
-    missing = [t for t in required.keys() if t not in existing]
-
-    if missing:
-        st.error(
-            "Your service account can open this spreadsheet but cannot create new tabs.\n\n"
-            "Create these tabs manually in Google Sheets (exact names):\n"
-            + "\n".join([f"- {t}" for t in missing])
-        )
-        st.stop()
-
-    # Ensure headers for existing tabs
-    for tab, headers in required.items():
-        w = b.worksheet(tab)
-        ensure_headers(w, headers)
-    for tab, headers in required.items():
-        w = get_or_create_ws(b, tab, rows=3000, cols=max(30, len(headers) + 5))
-        ensure_headers(w, headers)
-
-
-# ---------------------------
-# OPTIONAL: CONNECTION / PERMISSION TEST
-# ---------------------------
+# =========================================================
+# CONNECTION TEST UI
+# =========================================================
 def permission_test_ui():
     with st.expander("🔧 Google Sheets connection test", expanded=False):
-        st.write(
-            "Service account:",
-            st.secrets["gcp_service_account"].get("client_email", "(missing)")
-        )
-        st.write(
-            "Spreadsheet ID:",
-            st.secrets.get("GSHEET_ID", "⚠️ GSHEET_ID missing from secrets")
-        )
+        st.write("Service account:", st.secrets.get("gcp_service_account", {}).get("client_email", "(missing)"))
+        st.write("Spreadsheet ID:", st.secrets.get("GSHEET_ID", "(missing GSHEET_ID)"))
+        try:
+            b = book()
+            st.success(f"Connected OK ✅  |  Sheet title: {b.title}")
+            st.write("Tabs found:", [w.title for w in b.worksheets()])
+        except Exception as e:
+            st.error(f"Connection failed: {e}")
 
-        if st.button("Test: create + delete temp tab"):
-            try:
-                b = book()
-                tmp = b.add_worksheet(title="_TMP_PERMISSION_TEST_", rows="10", cols="5")
-                b.del_worksheet(tmp)
-                st.success("✅ Can create/delete tabs. Permissions OK.")
-            except Exception as e:
-                st.exception(e)
-                st.stop()
-
-
-# ---------------------------
+# =========================================================
 # ITEMS + STOCK
-# ---------------------------
+# =========================================================
 def ensure_stock_rows_for_item(item_id: int):
     df = read_df("stock")
     existing = set()
     if not df.empty:
         for _, r in df.iterrows():
-            existing.add((str(r.get("item_id", "")), str(r.get("location", ""))))
+            existing.add((str(r.get("item_id")), str(r.get("location"))))
 
     rows = []
     for loc in LOCATIONS:
         if (str(item_id), loc) not in existing:
             rows.append([item_id, loc, 0])
-    append_rows("stock", rows)
-
+    if rows:
+        ws("stock").append_rows(rows, value_input_option="USER_ENTERED")
 
 def get_items_df(active_only=True):
     df = read_df("items")
     if df.empty:
         return pd.DataFrame(columns=["id", "name", "unit", "par_level", "price_nzd", "active"])
-
     df["id"] = df["id"].apply(lambda v: _safe_int(v, 0))
     df["par_level"] = df["par_level"].apply(lambda v: _safe_float(v, 0.0))
     df["price_nzd"] = df["price_nzd"].apply(lambda v: _safe_float(v, 0.0))
-    df["active"] = df["active"].apply(_truthy_1)
-
+    df["active"] = df["active"].apply(_bool01)
     if active_only:
         df = df[df["active"] == 1]
-
     return df.sort_values("name", key=lambda s: s.astype(str).str.lower())
-
 
 def add_item(name: str, unit: str, par_level: float, price_nzd: float, active: int = 1):
     name = name.strip()
@@ -271,31 +222,22 @@ def add_item(name: str, unit: str, par_level: float, price_nzd: float, active: i
         raise ValueError("Item name cannot be empty.")
 
     row_idx = find_row_idx("items", "name", name)
-
     if row_idx is None:
         iid = next_id("items")
-        ws("items").append_row(
-            [iid, name, unit.strip() or "unit", float(par_level), float(price_nzd), int(active)],
-            value_input_option="USER_ENTERED",
-        )
+        ws("items").append_row([iid, name, unit, par_level, price_nzd, int(active)], value_input_option="USER_ENTERED")
         item_id = iid
     else:
-        update_cells(
-            "items",
-            row_idx,
-            {
-                "unit": unit.strip() or "unit",
-                "par_level": float(par_level),
-                "price_nzd": float(price_nzd),
-                "active": int(active),
-            },
-        )
+        update_cells("items", row_idx, {
+            "unit": unit,
+            "par_level": par_level,
+            "price_nzd": price_nzd,
+            "active": int(active),
+        })
         w = ws("items")
         header = w.row_values(1)
         item_id = _safe_int(w.cell(row_idx, header.index("id") + 1).value, 0)
 
     ensure_stock_rows_for_item(item_id)
-
 
 def get_item_id_by_name(name: str):
     row_idx = find_row_idx("items", "name", name)
@@ -303,11 +245,10 @@ def get_item_id_by_name(name: str):
         return None
     w = ws("items")
     header = w.row_values(1)
-    active_val = w.cell(row_idx, header.index("active") + 1).value
-    if _truthy_1(active_val) != 1:
+    active_val = str(w.cell(row_idx, header.index("active") + 1).value).strip().lower()
+    if active_val not in ["1", "true", "yes", "y"]:
         return None
     return _safe_int(w.cell(row_idx, header.index("id") + 1).value, None)
-
 
 def adjust_stock(item_id: int, location: str, delta: float, reason: str, ref_type=None, ref_id=None):
     if location not in LOCATIONS:
@@ -317,18 +258,14 @@ def adjust_stock(item_id: int, location: str, delta: float, reason: str, ref_typ
 
     ensure_stock_rows_for_item(item_id)
     stock = read_df("stock")
-    if stock.empty:
-        ws("stock").append_row([item_id, location, float(delta)], value_input_option="USER_ENTERED")
-        current_qty = 0.0
-        target_row = None
-    else:
-        target_row = None
-        current_qty = 0.0
-        for i, r in enumerate(stock.to_dict("records"), start=2):
-            if str(r.get("item_id")) == str(item_id) and str(r.get("location")) == str(location):
-                target_row = i
-                current_qty = _safe_float(r.get("qty"), 0.0)
-                break
+
+    target_row = None
+    current_qty = 0.0
+    for i, r in enumerate(stock.to_dict("records"), start=2):
+        if str(r.get("item_id")) == str(item_id) and str(r.get("location")) == str(location):
+            target_row = i
+            current_qty = _safe_float(r.get("qty"), 0.0)
+            break
 
     new_qty = current_qty + float(delta)
     if target_row is None:
@@ -338,19 +275,9 @@ def adjust_stock(item_id: int, location: str, delta: float, reason: str, ref_typ
 
     mid = next_id("movements")
     ws("movements").append_row(
-        [
-            mid,
-            now_iso(),
-            int(item_id),
-            location,
-            float(delta),
-            reason,
-            ref_type or "",
-            ref_id or "",
-        ],
-        value_input_option="USER_ENTERED",
+        [mid, now_iso(), item_id, location, float(delta), reason, ref_type or "", ref_id or ""],
+        value_input_option="USER_ENTERED"
     )
-
 
 def get_stock_df():
     stock = read_df("stock")
@@ -366,7 +293,6 @@ def get_stock_df():
         ["name", "location"], key=lambda s: s.astype(str).str.lower()
     )
 
-
 def get_stock_pivot():
     df = get_stock_df()
     if df.empty:
@@ -375,7 +301,7 @@ def get_stock_pivot():
         index=["item_id", "name", "unit", "par_level"],
         columns="location",
         values="qty",
-        aggfunc="sum",
+        aggfunc="sum"
     ).reset_index()
     for loc in LOCATIONS:
         if loc not in pivot.columns:
@@ -383,25 +309,19 @@ def get_stock_pivot():
     pivot["Below PAR?"] = (pivot[LOC_PREP] < pivot["par_level"]).map({True: "YES", False: ""})
     return pivot
 
-
-# ---------------------------
+# =========================================================
 # ORDERS
-# ---------------------------
+# =========================================================
 def create_order(note: str = "") -> int:
     oid = next_id("orders")
-    ws("orders").append_row(
-        [oid, now_iso(), LOC_TRUCK, LOC_PREP, ORDER_STATUS_PENDING, note.strip()],
-        value_input_option="USER_ENTERED",
-    )
+    ws("orders").append_row([oid, now_iso(), LOC_TRUCK, LOC_PREP, ORDER_STATUS_PENDING, note.strip()], value_input_option="USER_ENTERED")
     return oid
-
 
 def add_order_line(order_id: int, item_id: int, qty: float):
     if qty <= 0:
         raise ValueError("Qty must be > 0.")
     lid = next_id("order_lines")
     ws("order_lines").append_row([lid, int(order_id), int(item_id), float(qty)], value_input_option="USER_ENTERED")
-
 
 def get_orders_df(limit=100):
     df = read_df("orders")
@@ -410,7 +330,6 @@ def get_orders_df(limit=100):
     df["id"] = df["id"].apply(lambda v: _safe_int(v, 0))
     df = df.sort_values("id", ascending=False).head(limit)
     return df[["id", "created_at", "status", "note"]]
-
 
 def get_order_lines_df(order_id: int):
     ol = read_df("order_lines")
@@ -429,13 +348,11 @@ def get_order_lines_df(order_id: int):
     merged = ol.merge(items[["id", "name", "unit"]], left_on="item_id", right_on="id", how="left")
     return merged[["name", "unit", "qty", "item_id"]].sort_values("name", key=lambda s: s.astype(str).str.lower())
 
-
 def set_order_status(order_id: int, status: str):
     row_idx = find_row_idx("orders", "id", str(order_id))
     if row_idx is None:
         raise ValueError("Order not found.")
     update_cells("orders", row_idx, {"status": status})
-
 
 def fulfill_order(order_id: int):
     lines = get_order_lines_df(order_id)
@@ -459,9 +376,7 @@ def fulfill_order(order_id: int):
         item_id = int(line["item_id"])
         qty = float(line["qty"])
         if prep_map.get(item_id, 0.0) < qty:
-            raise ValueError(
-                f"Not enough Prep stock for {line['name']} (have {prep_map.get(item_id, 0.0)}, need {qty})"
-            )
+            raise ValueError(f"Not enough Prep stock for {line['name']} (have {prep_map.get(item_id, 0.0)}, need {qty})")
 
     for _, line in lines.iterrows():
         item_id = int(line["item_id"])
@@ -471,30 +386,24 @@ def fulfill_order(order_id: int):
 
     set_order_status(order_id, ORDER_STATUS_FULFILLED)
 
-
 def get_movements_df(limit=300):
     mv = read_df("movements")
     items = get_items_df(active_only=False)
     if mv.empty:
         return pd.DataFrame(columns=["created_at", "name", "location", "delta", "reason", "ref_type", "ref_id"])
-
     mv["id"] = mv["id"].apply(lambda v: _safe_int(v, 0))
     mv = mv.sort_values("id", ascending=False).head(limit)
     mv["item_id"] = mv["item_id"].apply(lambda v: _safe_int(v, 0))
-
     merged = mv.merge(items[["id", "name"]], left_on="item_id", right_on="id", how="left")
     return merged[["created_at", "name", "location", "delta", "reason", "ref_type", "ref_id"]]
 
-
-# ---------------------------
+# =========================================================
 # MENU
-# ---------------------------
+# =========================================================
 def seed_menu_if_empty():
     df = read_df("menu_items")
-    # If it has ANY data rows, don't seed
-    if not df.empty and len(df) > 0:
+    if not df.empty:
         return
-
     starters = [
         ("JUST_CHICKEN", "Just Chicken", 20.00, 1, 10),
         ("SMALL_CHIPS", "Small Chicken on Chips", 22.00, 1, 20),
@@ -504,28 +413,21 @@ def seed_menu_if_empty():
         ("CHIPS", "Chips", 8.00, 1, 60),
     ]
     w = ws("menu_items")
-    rows = []
     for sku, name, price, active, sort_order in starters:
         mid = next_id("menu_items")
-        rows.append([mid, sku, name, float(price), int(active), int(sort_order)])
-    w.append_rows(rows, value_input_option="USER_ENTERED")
-
+        w.append_row([mid, sku, name, price, active, sort_order], value_input_option="USER_ENTERED")
 
 def get_menu_items(active_only=True):
     df = read_df("menu_items")
     if df.empty:
         return pd.DataFrame(columns=["id", "sku", "name", "price", "active", "sort_order"])
-
     df["id"] = df["id"].apply(lambda v: _safe_int(v, 0))
     df["price"] = df["price"].apply(lambda v: _safe_float(v, 0.0))
-    df["active"] = df["active"].apply(_truthy_1)
+    df["active"] = df["active"].apply(_bool01)
     df["sort_order"] = df["sort_order"].apply(lambda v: _safe_int(v, 0))
-
     if active_only:
         df = df[df["active"] == 1]
-
     return df.sort_values(["sort_order", "name"], key=lambda s: s.astype(str).str.lower())
-
 
 def upsert_menu_items(df: pd.DataFrame):
     w = ws("menu_items")
@@ -534,7 +436,6 @@ def upsert_menu_items(df: pd.DataFrame):
         name = str(r.get("name", "")).strip()
         if not sku or not name:
             continue
-
         price = float(r.get("price", 0.0))
         active = 1 if bool(r.get("active", True)) else 0
         sort_order = int(r.get("sort_order", 0))
@@ -548,37 +449,24 @@ def upsert_menu_items(df: pd.DataFrame):
             if row_idx is None:
                 w.append_row([int(rid), sku, name, price, active, sort_order], value_input_option="USER_ENTERED")
             else:
-                update_cells(
-                    "menu_items",
-                    row_idx,
-                    {"sku": sku, "name": name, "price": price, "active": active, "sort_order": sort_order},
-                )
-
+                update_cells("menu_items", row_idx, {"sku": sku, "name": name, "price": price, "active": active, "sort_order": sort_order})
 
 def get_menu_recipe(menu_id: int):
     mr = read_df("menu_recipes")
     items = get_items_df(active_only=True)
     if mr.empty:
-        return pd.DataFrame(columns=["id", "menu_id", "item_id", "item_name", "qty"])
-
+        return pd.DataFrame(columns=["item_id", "qty"])
     mr["menu_id"] = mr["menu_id"].apply(lambda v: _safe_int(v, 0))
     mr = mr[mr["menu_id"] == int(menu_id)].copy()
     if mr.empty:
-        return pd.DataFrame(columns=["id", "menu_id", "item_id", "item_name", "qty"])
-
+        return pd.DataFrame(columns=["item_id", "qty"])
     mr["item_id"] = mr["item_id"].apply(lambda v: _safe_int(v, 0))
     mr["qty"] = mr["qty"].apply(lambda v: _safe_float(v, 0.0))
     mr = mr[mr["qty"] > 0]
-
-    merged = mr.merge(items[["id", "name"]], left_on="item_id", right_on="id", how="left")
-    merged = merged.rename(columns={"name": "item_name"})
-    return merged[["id", "menu_id", "item_id", "item_name", "qty"]].sort_values(
-        "item_name", key=lambda s: s.astype(str).str.lower()
-    )
-
+    return mr[["item_id", "qty"]]
 
 def upsert_menu_recipe(menu_id: int, df: pd.DataFrame):
-    # Set old recipe rows to qty=0 for this menu_id (simple + avoids deletes)
+    # Soft-wipe existing recipe rows for this menu_id by setting qty=0 (keeps history)
     existing = read_df("menu_recipes")
     if not existing.empty:
         existing["menu_id"] = existing["menu_id"].apply(lambda v: _safe_int(v, 0))
@@ -586,8 +474,7 @@ def upsert_menu_recipe(menu_id: int, df: pd.DataFrame):
             if _safe_int(r.get("menu_id"), 0) == int(menu_id):
                 update_cells("menu_recipes", i, {"qty": 0})
 
-    # Append new recipe rows
-    rows = []
+    w = ws("menu_recipes")
     for _, r in df.iterrows():
         try:
             item_id = int(r["item_id"])
@@ -597,10 +484,7 @@ def upsert_menu_recipe(menu_id: int, df: pd.DataFrame):
         if item_id <= 0 or qty == 0:
             continue
         rid = next_id("menu_recipes")
-        rows.append([rid, int(menu_id), int(item_id), float(qty)])
-
-    append_rows("menu_recipes", rows)
-
+        w.append_row([rid, int(menu_id), int(item_id), float(qty)], value_input_option="USER_ENTERED")
 
 def get_recipe_map(menu_id: int):
     df = read_df("menu_recipes")
@@ -615,24 +499,21 @@ def get_recipe_map(menu_id: int):
     df = df[df["qty"] > 0]
     return {int(r["item_id"]): float(r["qty"]) for _, r in df.iterrows()}
 
-
-# ---------------------------
+# =========================================================
 # SALES / POS
-# ---------------------------
+# =========================================================
 def create_sale(payment_method: str, note: str = "") -> int:
     sid = next_id("sales")
     ws("sales").append_row([sid, now_iso(), today_str(), payment_method, note.strip()], value_input_option="USER_ENTERED")
     return sid
-
 
 def add_sale_line(sale_id: int, menu_id: int, sku: str, name: str, qty: float, unit_price: float):
     line_total = float(qty) * float(unit_price)
     lid = next_id("sale_lines")
     ws("sale_lines").append_row(
         [lid, int(sale_id), int(menu_id), sku, name, float(qty), float(unit_price), float(line_total)],
-        value_input_option="USER_ENTERED",
+        value_input_option="USER_ENTERED"
     )
-
 
 def get_today_sales_summary():
     sales = read_df("sales")
@@ -640,7 +521,7 @@ def get_today_sales_summary():
     if sales.empty or lines.empty:
         return (
             pd.DataFrame(columns=["sale_date", "payment_method", "total"]),
-            pd.DataFrame(columns=["sku", "name", "qty", "total"]),
+            pd.DataFrame(columns=["sku", "name", "qty", "total"])
         )
 
     sales["id"] = sales["id"].apply(lambda v: _safe_int(v, 0))
@@ -656,7 +537,7 @@ def get_today_sales_summary():
     if merged.empty:
         return (
             pd.DataFrame(columns=["sale_date", "payment_method", "total"]),
-            pd.DataFrame(columns=["sku", "name", "qty", "total"]),
+            pd.DataFrame(columns=["sku", "name", "qty", "total"])
         )
 
     pay = (
@@ -670,7 +551,6 @@ def get_today_sales_summary():
         .sort_values("total", ascending=False)
     )
     return pay, item
-
 
 def record_pos_sale(menu_row: pd.Series, qty: float, payment_method: str, note: str = ""):
     if qty <= 0:
@@ -700,10 +580,9 @@ def record_pos_sale(menu_row: pd.Series, qty: float, payment_method: str, note: 
         )
     return sale_id
 
-
-# ---------------------------
+# =========================================================
 # EVENT MODE
-# ---------------------------
+# =========================================================
 def forecast_from_revenue(revenue_nzd: float, mix: dict, menu_df: pd.DataFrame):
     revenue_nzd = float(revenue_nzd)
     qty_rows = []
@@ -726,14 +605,12 @@ def forecast_from_revenue(revenue_nzd: float, mix: dict, menu_df: pd.DataFrame):
 
     return qty_rows, ing_totals
 
-
-# ---------------------------
-# Orders draft state (mobile friendly)
-# ---------------------------
+# =========================================================
+# ORDER DRAFT STATE
+# =========================================================
 def ensure_order_lines_state():
     if "order_lines" not in st.session_state:
         st.session_state["order_lines"] = []
-
 
 def add_to_order_draft(item_name: str, qty: float):
     ensure_order_lines_state()
@@ -745,28 +622,23 @@ def add_to_order_draft(item_name: str, qty: float):
             return
     st.session_state["order_lines"].append({"Item": item_name, "Qty": float(qty)})
 
-
 def set_order_draft_from_name_totals(name_totals: dict):
     ensure_order_lines_state()
-    st.session_state["order_lines"] = [
-        {"Item": k, "Qty": float(v)} for k, v in name_totals.items() if float(v) > 0
-    ]
+    st.session_state["order_lines"] = [{"Item": k, "Qty": float(v)} for k, v in name_totals.items() if float(v) > 0]
 
-
-# ---------------------------
-# APP UI
-# ---------------------------
-st.set_page_config(page_title="JAEJU Ops", page_icon="jaeju-logo.jpg", layout="wide")
-
-# Debug tool (optional)
+# =========================================================
+# APP STARTUP
+# =========================================================
+st.title("JAEJU Stock + POS + Events")
 permission_test_ui()
 
-# Init Sheets DB + seed
+# init DB
 init_db()
 seed_menu_if_empty()
 
-st.title("JAEJU Stock + POS + Events")
-
+# =========================================================
+# UI NAV
+# =========================================================
 mobile_mode = st.toggle("Mobile mode", value=True)
 PAGES = ["POS", "Event Mode", "Orders", "Dashboard", "Adjust Stock", "Menu Admin", "Items", "Movements"]
 
@@ -777,14 +649,11 @@ else:
     tabs = st.tabs(PAGES)
     page = None
 
-
-def _container_for(name: str):
-    return st.container() if mobile_mode else tabs[PAGES.index(name)]
-
-
-# -------- POS --------
+# =========================================================
+# POS
+# =========================================================
 if (mobile_mode and page == "POS") or (not mobile_mode):
-    container = _container_for("POS")
+    container = st.container() if mobile_mode else tabs[PAGES.index("POS")]
     with container:
         st.subheader("POS (one-tap buttons)")
 
@@ -812,15 +681,10 @@ if (mobile_mode and page == "POS") or (not mobile_mode):
 
         st.divider()
         st.subheader("Today totals")
-
         pay_summary, item_summary = get_today_sales_summary()
         total_today = float(pay_summary["total"].sum()) if not pay_summary.empty else 0.0
-        eftpos_today = float(
-            pay_summary.loc[pay_summary["payment_method"] == PAYMENT_EFTPOS, "total"].sum()
-        ) if not pay_summary.empty else 0.0
-        cash_today = float(
-            pay_summary.loc[pay_summary["payment_method"] == PAYMENT_CASH, "total"].sum()
-        ) if not pay_summary.empty else 0.0
+        eftpos_today = float(pay_summary.loc[pay_summary["payment_method"] == PAYMENT_EFTPOS, "total"].sum()) if not pay_summary.empty else 0.0
+        cash_today = float(pay_summary.loc[pay_summary["payment_method"] == PAYMENT_CASH, "total"].sum()) if not pay_summary.empty else 0.0
 
         c1, c2, c3 = st.columns(3)
         c1.metric("Total", f"${total_today:,.2f}")
@@ -832,10 +696,11 @@ if (mobile_mode and page == "POS") or (not mobile_mode):
         else:
             st.info("No sales recorded today yet.")
 
-
-# -------- Event Mode --------
+# =========================================================
+# EVENT MODE
+# =========================================================
 if (mobile_mode and page == "Event Mode") or (not mobile_mode):
-    container = _container_for("Event Mode")
+    container = st.container() if mobile_mode else tabs[PAGES.index("Event Mode")]
     with container:
         st.subheader("Event Mode (Revenue → Ingredients → Draft Order)")
 
@@ -876,16 +741,14 @@ if (mobile_mode and page == "Event Mode") or (not mobile_mode):
                 qty_view = []
                 for mid, qty_est in qty_rows:
                     row = menu.loc[menu["id"] == mid].iloc[0]
-                    qty_view.append(
-                        {"Menu item": row["name"], "Qty (est)": round(float(qty_est), 1), "Price": float(row["price"])}
-                    )
+                    qty_view.append({"Menu item": row["name"], "Qty (est)": round(float(qty_est), 1), "Price": float(row["price"])})
                 st.dataframe(pd.DataFrame(qty_view), use_container_width=True, hide_index=True)
 
                 st.markdown("### Load sheet (ingredients)")
-                load_df = (
-                    pd.DataFrame([{"Item": k, "Qty": round(float(v), 2)} for k, v in name_totals.items() if float(v) > 0])
-                    .sort_values("Item")
-                )
+                load_df = pd.DataFrame(
+                    [{"Item": k, "Qty": round(float(v), 2)} for k, v in name_totals.items() if float(v) > 0],
+                    columns=["Item", "Qty"]
+                ).sort_values("Item")
                 st.dataframe(load_df, use_container_width=True, hide_index=True)
 
                 st.download_button(
@@ -899,10 +762,11 @@ if (mobile_mode and page == "Event Mode") or (not mobile_mode):
                     set_order_draft_from_name_totals(name_totals)
                     st.success("Draft created. Go to Orders tab and press Create order.")
 
-
-# -------- Orders --------
+# =========================================================
+# ORDERS
+# =========================================================
 if (mobile_mode and page == "Orders") or (not mobile_mode):
-    container = _container_for("Orders")
+    container = st.container() if mobile_mode else tabs[PAGES.index("Orders")]
     with container:
         st.subheader("Truck → Prep Kitchen Orders (mobile friendly)")
 
@@ -994,17 +858,15 @@ if (mobile_mode and page == "Orders") or (not mobile_mode):
                     st.error(str(e))
 
             if c2.button("Cancel order"):
-                try:
-                    set_order_status(int(order_id), ORDER_STATUS_CANCELLED)
-                    st.success("Cancelled.")
-                    st.rerun()
-                except Exception as e:
-                    st.error(str(e))
+                set_order_status(int(order_id), ORDER_STATUS_CANCELLED)
+                st.success("Cancelled.")
+                st.rerun()
 
-
-# -------- Dashboard --------
+# =========================================================
+# DASHBOARD
+# =========================================================
 if (mobile_mode and page == "Dashboard") or (not mobile_mode):
-    container = _container_for("Dashboard")
+    container = st.container() if mobile_mode else tabs[PAGES.index("Dashboard")]
     with container:
         st.subheader("Stock snapshot")
         pivot = get_stock_pivot()
@@ -1014,13 +876,14 @@ if (mobile_mode and page == "Dashboard") or (not mobile_mode):
             st.dataframe(
                 pivot[["name", "unit", "par_level", LOC_TRUCK, LOC_PREP, "Below PAR?"]],
                 use_container_width=True,
-                hide_index=True,
+                hide_index=True
             )
 
-
-# -------- Adjust Stock --------
+# =========================================================
+# ADJUST STOCK
+# =========================================================
 if (mobile_mode and page == "Adjust Stock") or (not mobile_mode):
-    container = _container_for("Adjust Stock")
+    container = st.container() if mobile_mode else tabs[PAGES.index("Adjust Stock")]
     with container:
         st.subheader("Adjust stock (counts, wastage, deliveries)")
         items = get_items_df(active_only=True)
@@ -1036,23 +899,19 @@ if (mobile_mode and page == "Adjust Stock") or (not mobile_mode):
 
             if st.button("Apply adjustment", type="primary"):
                 try:
-                    adjust_stock(
-                        int(item_map[item_name]),
-                        location,
-                        float(delta),
-                        reason=reason.strip() or "Manual adjustment",
-                        ref_type="manual",
-                        ref_id=None,
-                    )
+                    adjust_stock(int(item_map[item_name]), location, float(delta),
+                                 reason=reason.strip() or "Manual adjustment",
+                                 ref_type="manual", ref_id=None)
                     st.success("Stock updated.")
                     st.rerun()
                 except Exception as e:
                     st.error(str(e))
 
-
-# -------- Menu Admin --------
+# =========================================================
+# MENU ADMIN
+# =========================================================
 if (mobile_mode and page == "Menu Admin") or (not mobile_mode):
-    container = _container_for("Menu Admin")
+    container = st.container() if mobile_mode else tabs[PAGES.index("Menu Admin")]
     with container:
         st.subheader("Menu Admin (edit menu + recipes)")
         st.info("Tip: Do this on a laptop if possible. Mobile works, but it’s slower.")
@@ -1114,7 +973,7 @@ if (mobile_mode and page == "Menu Admin") or (not mobile_mode):
                         "item_id": st.column_config.SelectboxColumn(
                             "Ingredient item",
                             options=options,
-                            format_func=lambda x: id_to_name.get(int(x), str(x)),
+                            format_func=lambda x: id_to_name.get(int(x), str(x))
                         ),
                         "qty": st.column_config.NumberColumn("Qty per sale", step=0.01),
                     },
@@ -1128,10 +987,11 @@ if (mobile_mode and page == "Menu Admin") or (not mobile_mode):
                     except Exception as e:
                         st.error(str(e))
 
-
-# -------- Items --------
+# =========================================================
+# ITEMS
+# =========================================================
 if (mobile_mode and page == "Items") or (not mobile_mode):
-    container = _container_for("Items")
+    container = st.container() if mobile_mode else tabs[PAGES.index("Items")]
     with container:
         st.subheader("Items")
 
@@ -1140,17 +1000,10 @@ if (mobile_mode and page == "Items") or (not mobile_mode):
             unit = st.text_input("Unit", placeholder="kg / pcs / L")
             par = st.number_input("PAR level (Prep)", min_value=0.0, value=0.0, step=0.5)
             price = st.number_input("Price NZD (optional)", min_value=0.0, value=0.0, step=0.1)
-            active = st.checkbox("Active", value=True)
 
             if st.button("Save item", type="primary"):
                 try:
-                    add_item(
-                        name=name,
-                        unit=unit.strip() or "unit",
-                        par_level=float(par),
-                        price_nzd=float(price),
-                        active=1 if active else 0,
-                    )
+                    add_item(name=name, unit=unit.strip() or "unit", par_level=float(par), price_nzd=float(price))
                     st.success("Saved.")
                     st.rerun()
                 except Exception as e:
@@ -1160,10 +1013,11 @@ if (mobile_mode and page == "Items") or (not mobile_mode):
         if not df.empty:
             st.dataframe(df, use_container_width=True, hide_index=True)
 
-
-# -------- Movements --------
+# =========================================================
+# MOVEMENTS
+# =========================================================
 if (mobile_mode and page == "Movements") or (not mobile_mode):
-    container = _container_for("Movements")
+    container = st.container() if mobile_mode else tabs[PAGES.index("Movements")]
     with container:
         st.subheader("Movements log (audit trail)")
         mv = get_movements_df()

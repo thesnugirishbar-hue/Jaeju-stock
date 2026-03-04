@@ -1014,4 +1014,4 @@ if (mobile_mode and page == "Items") or (not mobile_mode):
             name = st.text_input("Item name", placeholder="Chicken thigh diced")
             unit = st.text_input("Unit", placeholder="kg / pcs / L")
             par = st.number_input("PAR level (Prep)", min_value=0.0, value=0.0, step=0.5)
-           price = st.number_input("Price NZD", min_value=0.0, step=0.1)
+            price = st.number_input("Price NZD", min_value=0.0, step=0.1)

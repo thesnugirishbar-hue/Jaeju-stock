@@ -1893,7 +1893,11 @@ if (mobile_mode and page == "Event Mode") or (not mobile_mode):
         if menu.empty:
             st.warning("No active menu items. Add them in Menu Admin.")
         else:
-            event_name = st.text_input("Event name", placeholder="Electric Ave Day 1")
+            event_name = st.text_input(
+    "Event name",
+    placeholder="Electric Ave Day 1",
+    key="event_name_input"
+)
             revenue = st.number_input("Target revenue (NZD)", min_value=0.0, value=10000.0, step=500.0)
             buffer_pct = st.number_input("Safety buffer (%)", min_value=0.0, value=10.0, step=1.0)
 

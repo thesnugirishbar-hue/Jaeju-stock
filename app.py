@@ -772,5 +772,5 @@ if (mobile_mode and page == "POS") or (not mobile_mode):
         cash_today = float(pay_summary.loc[pay_summary["payment_method"] == PAYMENT_CASH, "total"].sum()) if not pay_summary.empty else 0.0
 
         c1, c2, c3 = st.columns(3)
-        c1.metric("Total", f"${total_today:,.2f}")
+      c1.metric("Total", f"${total_today:,.2f}")
         c2.metric("E

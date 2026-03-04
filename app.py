@@ -1825,7 +1825,7 @@ seed_menu_if_empty()
 
 st.title("JAEJU Stock + POS + Events (Postgres)")
 
-mobile_mode = st.toggle("Mobile mode", value=True)
+mobile_mode = st.toggle("Mobile mode", value=True, key="mobile_mode_toggle")
 PAGES = ["POS", "Event Mode", "Orders", "Dashboard", "Adjust Stock", "Menu Admin", "Items", "Movements"]
 
 if mobile_mode:

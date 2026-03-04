@@ -1,3 +1,3 @@
 streamlit
 pandas
-psycopg[binary]
+psycopg[binary.pool]

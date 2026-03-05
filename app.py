@@ -971,12 +971,12 @@ def page_orders():
     st.header("Orders / Transfers")
 
     # --- init transfer session state (MUST be before widgets) ---
-st.session_state.setdefault("tr_item_id_pick", None)
-st.session_state.setdefault("tr_qty_pick", 0.0)
-st.session_state.setdefault("tr_note", "")
-st.session_state.setdefault("tr_from_loc", "Prep Kitchen")
-st.session_state.setdefault("tr_to_loc", "Food Truck")
-st.session_state.setdefault("transfer_cart",[])
+    st.session_state.setdefault("tr_item_id_pick", None)
+    st.session_state.setdefault("tr_qty_pick", 0.0)
+    st.session_state.setdefault("tr_note", "")
+    st.session_state.setdefault("tr_from_loc", "Prep Kitchen")
+    st.session_state.setdefault("tr_to_loc", "Food Truck")
+    st.session_state.setdefault("transfer_cart",[])
     tab1, tab2, tab3 = st.tabs(["Create transfer (Prep → Truck)", "Receive transfer", "Below par list"])
 
     items = df_items(active_only=True)

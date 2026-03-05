@@ -1159,6 +1159,93 @@ def page_prep_planner():
 
     st.info("Next step: connect recipes so this outputs ingredient quantities + a draft transfer order.")
 
+def page_stock_transfer():
+    st.header("Stock Transfer (Prep Kitchen → Food Truck)")
+
+    items = df_items(active_only=True)
+    if items.empty:
+        st.info("Add items first.")
+        return
+
+    colA, colB = st.columns([2, 3])
+
+    with colA:
+        st.subheader("1) Create a transfer")
+        from_loc = st.selectbox("From", DEFAULT_LOCATIONS, index=DEFAULT_LOCATIONS.index("Prep Kitchen") if "Prep Kitchen" in DEFAULT_LOCATIONS else 0)
+        to_loc = st.selectbox("To", DEFAULT_LOCATIONS, index=DEFAULT_LOCATIONS.index("Food Truck") if "Food Truck" in DEFAULT_LOCATIONS else 0)
+        note = st.text_input("Note (optional)", placeholder="Electric Ave top-up")
+
+        if st.button("Create new transfer", type="primary"):
+            if from_loc == to_loc:
+                st.error("From and To cannot be the same.")
+            else:
+                new_id = create_transfer_order(from_loc, to_loc, note)
+                st.session_state["active_transfer_id"] = new_id
+                st.success(f"Created Transfer #{new_id}")
+                st.rerun()
+
+    with colB:
+        st.subheader("2) Add lines to current transfer")
+        active_id = st.session_state.get("active_transfer_id")
+
+        if not active_id:
+            st.info("Create a transfer on the left first.")
+            return
+
+        order = get_transfer(int(active_id))
+        if not order:
+            st.warning("Active transfer not found. Create a new one.")
+            st.session_state.pop("active_transfer_id", None)
+            return
+
+        st.caption(f"Working on **Transfer #{active_id}** | {order['from_location']} → {order['to_location']} | status: **{order['status']}**")
+
+        if order["status"] != "draft":
+            st.info("This transfer is not a draft. Create a new one if you want to edit lines.")
+        else:
+            with st.form("add_transfer_line", clear_on_submit=True):
+                item_name = st.selectbox("Item", items["name"].tolist())
+                item_id = int(items.loc[items["name"] == item_name, "id"].iloc[0])
+                qty = st.number_input("Qty to transfer", min_value=0.0, value=0.0, step=1.0)
+                add_btn = st.form_submit_button("Add / Update line")
+
+            if add_btn:
+                add_transfer_line(int(active_id), item_id, Decimal(str(qty)))
+                st.success("Line saved.")
+                st.rerun()
+
+        st.divider()
+        st.subheader("3) Review lines")
+        lines = get_transfer_lines(int(active_id))
+        if not lines:
+            st.warning("No lines yet.")
+        else:
+            st.dataframe(pd.DataFrame(lines)[["item", "unit", "qty"]], use_container_width=True, hide_index=True)
+
+        st.divider()
+        st.subheader("4) Submit / Fulfil")
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            if st.button("Submit transfer", disabled=(order["status"] != "draft")):
+                submit_transfer(int(active_id))
+                st.success("Submitted. Now you can fulfil it.")
+                st.rerun()
+
+        with col2:
+            if st.button("Fulfil transfer (moves stock)", type="primary", disabled=(order["status"] != "submitted")):
+                try:
+                    fulfill_transfer(int(active_id))
+                    st.success("Fulfilled. Stock moved + movements logged.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(str(e))
+
+        with col3:
+            if st.button("Cancel", disabled=(order["status"] not in ("draft","submitted"))):
+                cancel_transfer(int(active_id))
+                st.warning("Cancelled.")
+                st.rerun()
 
 # =========================
 # Main

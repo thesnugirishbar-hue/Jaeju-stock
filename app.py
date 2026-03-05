@@ -1,6 +1,6 @@
 import os
-import time
-from datetime import datetime, timezone
+from datetime import datetime, date
+from decimal import Decimal
 
 import pandas as pd
 import streamlit as st
@@ -9,570 +9,723 @@ import psycopg
 from psycopg.rows import dict_row
 
 
-# ---------------------------
-# Config / helpers
-# ---------------------------
-
+# =========================
+# Config
+# =========================
 APP_TITLE = "JAEJU Stock + POS + Events (Postgres)"
-DEFAULT_LOCATIONS = ["Prep Kitchen", "Food Truck"]
+DEFAULT_LOCATIONS = ["Food Truck", "Prep Kitchen"]
 
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 
 
-def _now_utc():
-    return datetime.now(timezone.utc)
-
-
-def get_database_url() -> str:
-    """
-    Read DATABASE_URL from Streamlit secrets or env.
-    Accepts either:
-    - st.secrets["DATABASE_URL"]
-    - env DATABASE_URL
-    """
-    url = None
+# =========================
+# Secrets / DB URL
+# =========================
+def get_database_url() -> str | None:
+    # Streamlit Cloud: st.secrets
     try:
         if "DATABASE_URL" in st.secrets:
-            url = st.secrets["DATABASE_URL"]
+            return str(st.secrets["DATABASE_URL"]).strip()
     except Exception:
         pass
 
-    if not url:
-        url = os.getenv("DATABASE_URL")
-
-    if not url:
-        raise RuntimeError("DATABASE_URL not set. Add it in Streamlit Secrets or env vars.")
-
-    return url.strip()
+    # Local dev: env var
+    url = os.getenv("DATABASE_URL", "").strip()
+    return url or None
 
 
-@st.cache_resource
-def get_conn():
-    """
-    Supabase Transaction Pooler does NOT support PREPARE statements.
-    psycopg can auto-prepare after N executions. Disable it with prepare_threshold=0.
-    Also set sslmode=require unless already in the URL.
-    """
-    dsn = get_database_url()
+DATABASE_URL = get_database_url()
 
-    # If user didn't include sslmode, add it safely
-    if "sslmode=" not in dsn:
-        joiner = "&" if "?" in dsn else "?"
-        dsn = f"{dsn}{joiner}sslmode=require"
 
-    # connect_timeout helps avoid "hangs" when DNS/host issues
-    conn = psycopg.connect(
-        dsn,
+# =========================
+# Schema
+# =========================
+SCHEMA_SQL = r"""
+create table if not exists public.locations (
+  name text primary key
+);
+
+create table if not exists public.items (
+  id bigserial primary key,
+  name text not null unique,
+  unit text not null default 'Each',
+  par numeric not null default 0,
+  active boolean not null default true,
+  created_at timestamptz not null default now()
+);
+
+-- Current stock snapshot (one row per item per location)
+create table if not exists public.stocks (
+  item_id bigint not null references public.items(id) on delete cascade,
+  location text not null references public.locations(name) on delete cascade,
+  qty numeric not null default 0,
+  updated_at timestamptz not null default now(),
+  primary key (item_id, location)
+);
+
+-- Movement log (audit trail)
+create table if not exists public.movements (
+  id bigserial primary key,
+  item_id bigint not null references public.items(id) on delete cascade,
+  location text not null references public.locations(name) on delete cascade,
+  qty_delta numeric not null,
+  reason text not null default 'adjustment',
+  note text null,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.menu_items (
+  id bigserial primary key,
+  name text not null unique,
+  price numeric not null default 0,
+  active boolean not null default true,
+  created_at timestamptz not null default now()
+);
+
+-- Recipe / ingredient usage per menu item
+create table if not exists public.menu_item_ingredients (
+  menu_item_id bigint not null references public.menu_items(id) on delete cascade,
+  item_id bigint not null references public.items(id) on delete cascade,
+  qty_per_sale numeric not null default 0,
+  primary key (menu_item_id, item_id)
+);
+
+create table if not exists public.events (
+  id bigserial primary key,
+  name text not null unique,
+  starts_on date null,
+  active boolean not null default true,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.sales (
+  id bigserial primary key,
+  sold_at timestamptz not null default now(),
+  menu_item_id bigint not null references public.menu_items(id),
+  qty numeric not null default 1,
+  price_each numeric not null default 0,
+  payment text not null default 'EFTPOS',
+  location text not null references public.locations(name),
+  event_name text null
+);
+
+-- Helpful indexes
+create index if not exists idx_movements_item_time on public.movements(item_id, created_at desc);
+create index if not exists idx_sales_time on public.sales(sold_at desc);
+create index if not exists idx_sales_event on public.sales(event_name);
+"""
+
+
+# =========================
+# DB Helpers (PATCHED)
+#   - No long-lived connection cache
+#   - prepare_threshold=0 disables prepared statements (fixes pooler issues)
+# =========================
+def connect():
+    if not DATABASE_URL:
+        raise RuntimeError(
+            "DATABASE_URL not set. In Streamlit secrets, use TOML: "
+            'DATABASE_URL = "postgresql://...:6543/postgres" (Supabase transaction pooler).'
+        )
+
+    # Key fix: prepare_threshold=0 (no prepared statements)
+    # Also: open/close per query (pooler-friendly)
+    return psycopg.connect(
+        DATABASE_URL,
         row_factory=dict_row,
         autocommit=True,
-        connect_timeout=10,
-        prepare_threshold=0,  # IMPORTANT for Supabase Transaction Pooler
+        prepare_threshold=0,
     )
-    return conn
 
 
 def exec_sql(sql: str, params=None, fetch: str | None = None):
-    """
-    fetch: None | 'one' | 'all'
-    """
-    if params is None:
-        params = ()
-    conn = get_conn()
-    with conn.cursor() as cur:
-        cur.execute(sql, params)
-        if fetch == "one":
-            return cur.fetchone()
-        if fetch == "all":
-            return cur.fetchall()
-        return None
+    params = params or ()
+    with connect() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            if fetch == "one":
+                return cur.fetchone()
+            if fetch == "all":
+                return cur.fetchall()
+            return None
+
+
+@st.cache_data(ttl=10)
+def read_sql(sql: str, params=None) -> list[dict]:
+    params = params or ()
+    rows = exec_sql(sql, params=params, fetch="all")
+    return rows or []
+
+
+def invalidate_cache():
+    st.cache_data.clear()
 
 
 def init_db():
-    """
-    Create required tables + seed locations.
-    Using explicit public.<table> everywhere to avoid schema/search_path confusion.
-    """
-    # locations
-    exec_sql(
-        """
-        create table if not exists public.locations (
-            name text primary key,
-            active boolean not null default true,
-            created_at timestamptz not null default now()
-        );
-        """
-    )
+    exec_sql(SCHEMA_SQL)
 
-    # items
-    exec_sql(
-        """
-        create table if not exists public.items (
-            id bigserial primary key,
-            name text not null,
-            unit text not null default '',
-            par numeric not null default 0,
-            active boolean not null default true,
-            created_at timestamptz not null default now()
-        );
-        """
-    )
+    # Ensure default locations exist
+    for loc in DEFAULT_LOCATIONS:
+        exec_sql("insert into public.locations(name) values (%s) on conflict do nothing;", (loc,))
 
-    # movements = stock changes
-    exec_sql(
-        """
-        create table if not exists public.movements (
-            id bigserial primary key,
-            item_id bigint not null references public.items(id) on delete cascade,
-            location text not null references public.locations(name),
-            qty numeric not null,
-            reason text not null default 'adjust',
-            note text,
-            created_at timestamptz not null default now()
-        );
-        """
-    )
 
-    # menu items (POS)
-    exec_sql(
-        """
-        create table if not exists public.menu_items (
-            id bigserial primary key,
-            name text not null,
-            price numeric not null default 0,
-            active boolean not null default true,
-            created_at timestamptz not null default now()
-        );
-        """
-    )
-
-    # sales (POS)
-    exec_sql(
-        """
-        create table if not exists public.sales (
-            id bigserial primary key,
-            menu_item_id bigint references public.menu_items(id) on delete set null,
-            menu_item_name text not null,
-            qty numeric not null default 1,
-            price_each numeric not null default 0,
-            payment text not null default 'EFTPOS',
-            location text not null references public.locations(name),
-            event_name text,
-            created_at timestamptz not null default now()
-        );
-        """
-    )
-
-    # seed locations
+# =========================
+# Business logic
+# =========================
+def ensure_stocks_for_item(item_id: int):
+    # Create stock rows for each location if missing
     for loc in DEFAULT_LOCATIONS:
         exec_sql(
             """
-            insert into public.locations(name, active)
-            values (%s, true)
-            on conflict (name) do update set active = excluded.active;
+            insert into public.stocks(item_id, location, qty)
+            values (%s, %s, 0)
+            on conflict (item_id, location) do nothing;
             """,
-            (loc,),
+            (item_id, loc),
         )
 
 
-def db_counts():
-    counts = {}
-    for tbl in ["locations", "items", "movements", "menu_items", "sales"]:
-        row = exec_sql(f"select count(*)::bigint as n from public.{tbl};", fetch="one")
-        counts[tbl] = int(row["n"]) if row else 0
-    return counts
+def upsert_item(name: str, unit: str, par: Decimal, active: bool):
+    row = exec_sql(
+        """
+        insert into public.items(name, unit, par, active)
+        values (%s, %s, %s, %s)
+        on conflict (name)
+        do update set unit=excluded.unit, par=excluded.par, active=excluded.active
+        returning id;
+        """,
+        (name.strip(), unit.strip(), par, active),
+        fetch="one",
+    )
+    if row and "id" in row:
+        ensure_stocks_for_item(int(row["id"]))
+    invalidate_cache()
 
 
-def load_locations(active_only=True):
+def set_stock(item_id: int, location: str, new_qty: Decimal, note: str = ""):
+    # Read current qty
+    cur = exec_sql(
+        "select qty from public.stocks where item_id=%s and location=%s;",
+        (item_id, location),
+        fetch="one",
+    )
+    cur_qty = Decimal(str(cur["qty"])) if cur else Decimal("0")
+    delta = new_qty - cur_qty
+
+    # Upsert current stock
+    exec_sql(
+        """
+        insert into public.stocks(item_id, location, qty, updated_at)
+        values (%s, %s, %s, now())
+        on conflict (item_id, location)
+        do update set qty=excluded.qty, updated_at=now();
+        """,
+        (item_id, location, new_qty),
+    )
+
+    # Movement log
+    exec_sql(
+        """
+        insert into public.movements(item_id, location, qty_delta, reason, note)
+        values (%s, %s, %s, 'adjustment', %s);
+        """,
+        (item_id, location, delta, note.strip() or None),
+    )
+
+    invalidate_cache()
+
+
+def upsert_menu_item(name: str, price: Decimal, active: bool):
+    exec_sql(
+        """
+        insert into public.menu_items(name, price, active)
+        values (%s, %s, %s)
+        on conflict (name)
+        do update set price=excluded.price, active=excluded.active;
+        """,
+        (name.strip(), price, active),
+    )
+    invalidate_cache()
+
+
+def set_recipe(menu_item_id: int, item_id: int, qty_per_sale: Decimal):
+    exec_sql(
+        """
+        insert into public.menu_item_ingredients(menu_item_id, item_id, qty_per_sale)
+        values (%s, %s, %s)
+        on conflict (menu_item_id, item_id)
+        do update set qty_per_sale=excluded.qty_per_sale;
+        """,
+        (menu_item_id, item_id, qty_per_sale),
+    )
+    invalidate_cache()
+
+
+def record_sale(menu_item_id: int, qty: Decimal, price_each: Decimal, payment: str, location: str, event_name: str | None):
+    exec_sql(
+        """
+        insert into public.sales(menu_item_id, qty, price_each, payment, location, event_name)
+        values (%s, %s, %s, %s, %s, %s);
+        """,
+        (menu_item_id, qty, price_each, payment, location, (event_name.strip() if event_name else None)),
+    )
+
+    # Deduct ingredients based on recipe
+    ingredients = read_sql(
+        """
+        select mii.item_id, mii.qty_per_sale
+        from public.menu_item_ingredients mii
+        where mii.menu_item_id = %s;
+        """,
+        (menu_item_id,),
+    )
+    for ing in ingredients:
+        ing_item_id = int(ing["item_id"])
+        per_sale = Decimal(str(ing["qty_per_sale"]))
+        deduct = -(per_sale * qty)
+
+        # Update stocks snapshot
+        exec_sql(
+            """
+            insert into public.stocks(item_id, location, qty, updated_at)
+            values (%s, %s, 0, now())
+            on conflict (item_id, location)
+            do nothing;
+            """,
+            (ing_item_id, location),
+        )
+        exec_sql(
+            """
+            update public.stocks
+            set qty = qty + %s, updated_at = now()
+            where item_id=%s and location=%s;
+            """,
+            (deduct, ing_item_id, location),
+        )
+        exec_sql(
+            """
+            insert into public.movements(item_id, location, qty_delta, reason, note)
+            values (%s, %s, %s, 'sale_deduct', %s);
+            """,
+            (ing_item_id, location, deduct, f"Auto-deduct via sale menu_item_id={menu_item_id}"),
+        )
+
+    invalidate_cache()
+
+
+# =========================
+# Data for UI
+# =========================
+def df_items(active_only: bool = False) -> pd.DataFrame:
+    sql = "select id, name, unit, par, active, created_at from public.items"
+    params = ()
     if active_only:
-        rows = exec_sql(
-            "select name from public.locations where active=true order by name;",
-            fetch="all",
-        )
-    else:
-        rows = exec_sql("select name from public.locations order by name;", fetch="all")
-    return [r["name"] for r in rows] if rows else []
+        sql += " where active = true"
+    sql += " order by name asc"
+    return pd.DataFrame(read_sql(sql, params))
 
 
-def load_items(active_only=True):
+def df_menu(active_only: bool = False) -> pd.DataFrame:
+    sql = "select id, name, price, active, created_at from public.menu_items"
     if active_only:
-        rows = exec_sql(
-            """
-            select id, name, unit, par, active, created_at
-            from public.items
-            where active=true
-            order by name;
-            """,
-            fetch="all",
-        )
-    else:
-        rows = exec_sql(
-            """
-            select id, name, unit, par, active, created_at
-            from public.items
-            order by name;
-            """,
-            fetch="all",
-        )
-    return rows or []
+        sql += " where active = true"
+    sql += " order by name asc"
+    return pd.DataFrame(read_sql(sql))
 
 
-def load_menu_items(active_only=True):
-    if active_only:
-        rows = exec_sql(
+def df_stocks() -> pd.DataFrame:
+    return pd.DataFrame(
+        read_sql(
             """
-            select id, name, price, active, created_at
-            from public.menu_items
-            where active=true
-            order by name;
-            """,
-            fetch="all",
-        )
-    else:
-        rows = exec_sql(
-            """
-            select id, name, price, active, created_at
-            from public.menu_items
-            order by name;
-            """,
-            fetch="all",
-        )
-    return rows or []
-
-
-def stock_snapshot(location: str | None = None):
-    """
-    Current stock = sum(movements.qty) grouped by item (+ optional location)
-    """
-    if location:
-        rows = exec_sql(
-            """
-            select
-              i.id,
-              i.name,
-              i.unit,
-              i.par,
-              coalesce(sum(m.qty), 0) as on_hand
-            from public.items i
-            left join public.movements m
-              on m.item_id = i.id and m.location = %s
+            select i.name as item, i.unit, s.location, s.qty, s.updated_at
+            from public.stocks s
+            join public.items i on i.id = s.item_id
             where i.active = true
-            group by i.id, i.name, i.unit, i.par
-            order by i.name;
-            """,
-            (location,),
-            fetch="all",
-        )
-    else:
-        rows = exec_sql(
+            order by i.name asc, s.location asc;
             """
-            select
-              i.id,
-              i.name,
-              i.unit,
-              i.par,
-              coalesce(sum(m.qty), 0) as on_hand
-            from public.items i
-            left join public.movements m
-              on m.item_id = i.id
-            where i.active = true
-            group by i.id, i.name, i.unit, i.par
-            order by i.name;
-            """,
-            fetch="all",
         )
-    return rows or []
+    )
 
 
-# ---------------------------
-# Pages
-# ---------------------------
+def df_low_stock() -> pd.DataFrame:
+    return pd.DataFrame(
+        read_sql(
+            """
+            select i.name as item, i.unit, i.par, s.location, s.qty
+            from public.stocks s
+            join public.items i on i.id = s.item_id
+            where i.active = true and s.qty < i.par
+            order by (i.par - s.qty) desc, i.name asc;
+            """
+        )
+    )
 
+
+def df_recent_movements(limit: int = 50) -> pd.DataFrame:
+    return pd.DataFrame(
+        read_sql(
+            """
+            select m.created_at, i.name as item, m.location, m.qty_delta, m.reason, m.note
+            from public.movements m
+            join public.items i on i.id = m.item_id
+            order by m.created_at desc
+            limit %s;
+            """,
+            (limit,),
+        )
+    )
+
+
+def df_sales_today() -> pd.DataFrame:
+    return pd.DataFrame(
+        read_sql(
+            """
+            select s.sold_at, mi.name as menu_item, s.qty, s.price_each, (s.qty*s.price_each) as total,
+                   s.payment, s.location, s.event_name
+            from public.sales s
+            join public.menu_items mi on mi.id = s.menu_item_id
+            where s.sold_at::date = current_date
+            order by s.sold_at desc;
+            """
+        )
+    )
+
+
+# =========================
+# UI Pages
+# =========================
 def page_dashboard():
-    st.subheader("Dashboard")
+    st.header("Dashboard")
 
-    items = load_items(active_only=True)
-    if not items:
+    items = df_items(active_only=True)
+    if items.empty:
         st.info("No items yet. Add items in Items tab.")
         return
 
-    locs = load_locations(active_only=True)
-    col1, col2 = st.columns([1, 2])
+    col1, col2, col3 = st.columns(3)
     with col1:
-        loc = st.selectbox("Location", ["All locations"] + locs, index=0)
+        st.metric("Active items", int(items.shape[0]))
 
-    rows = stock_snapshot(None if loc == "All locations" else loc)
-    df = pd.DataFrame(rows)
-    if df.empty:
-        st.info("No stock movements yet. Use Adjust Stock to add starting stock.")
-        return
-
-    df["par"] = pd.to_numeric(df["par"], errors="coerce").fillna(0)
-    df["on_hand"] = pd.to_numeric(df["on_hand"], errors="coerce").fillna(0)
-    df["below_par"] = df["on_hand"] < df["par"]
-
+    sales_today = df_sales_today()
     with col2:
-        st.caption("Stock snapshot is calculated from Movements.")
-        st.dataframe(
-            df[["name", "unit", "on_hand", "par", "below_par"]],
-            use_container_width=True,
-            hide_index=True,
-        )
+        total_today = float(sales_today["total"].sum()) if not sales_today.empty else 0.0
+        st.metric("Sales today (NZD)", f"{total_today:,.2f}")
+
+    low = df_low_stock()
+    with col3:
+        st.metric("Low stock rows", int(0 if low.empty else low.shape[0]))
+
+    st.subheader("Low stock")
+    if low.empty:
+        st.success("No low stock (qty >= par).")
+    else:
+        st.dataframe(low, use_container_width=True, hide_index=True)
+
+    st.subheader("Stock snapshot")
+    snap = df_stocks()
+    if snap.empty:
+        st.warning("No stock rows yet. Try Adjust Stock once (it writes to the stocks table).")
+    else:
+        st.dataframe(snap, use_container_width=True, hide_index=True)
+
+    st.subheader("Sales today")
+    if sales_today.empty:
+        st.caption("No sales recorded today yet.")
+    else:
+        st.dataframe(sales_today, use_container_width=True, hide_index=True)
 
 
 def page_items():
-    st.subheader("Items")
+    st.header("Items")
 
-    rows = load_items(active_only=False)
-    df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=["id", "name", "unit", "par", "active", "created_at"])
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    df = df_items(active_only=False)
+    if df.empty:
+        st.info("No items yet. Add one below.")
+    else:
+        st.dataframe(df, use_container_width=True, hide_index=True)
 
-    with st.expander("➕ Add / Update item", expanded=False):
-        col1, col2, col3, col4 = st.columns([2, 1, 1, 1])
+    st.divider()
+    st.subheader("Add / Update item")
 
-        with col1:
-            name = st.text_input("Name", placeholder="e.g. Chicken flour")
-        with col2:
-            unit = st.text_input("Unit", placeholder="e.g. Bkt / Btl / Each")
-        with col3:
-            par = st.number_input("Par", min_value=0.0, value=0.0, step=1.0)
-        with col4:
-            active = st.checkbox("Active", value=True)
+    with st.form("item_form", clear_on_submit=True):
+        name = st.text_input("Name")
+        unit = st.text_input("Unit", value="Each")
+        par = st.number_input("Par level", min_value=0.0, value=0.0, step=1.0)
+        active = st.checkbox("Active", value=True)
+        submitted = st.form_submit_button("Save item")
 
-        if st.button("Save item", type="primary"):
-            if not name.strip():
-                st.error("Name is required.")
-                return
+    if submitted:
+        if not name.strip():
+            st.error("Item name is required.")
+            return
+        upsert_item(name=name, unit=unit, par=Decimal(str(par)), active=active)
+        st.success("Saved.")
+        st.rerun()
 
-            # Upsert by name (simple)
-            exec_sql(
-                """
-                insert into public.items(name, unit, par, active)
-                values (%s, %s, %s, %s)
-                on conflict (id) do nothing;
-                """,
-                (name.strip(), unit.strip(), par, active),
-            )
-            st.success("Saved. Refreshing…")
-            time.sleep(0.3)
-            st.rerun()
+
+def page_menu_admin():
+    st.header("Menu Admin")
+
+    menu = df_menu(active_only=False)
+    if menu.empty:
+        st.info("No menu items yet.")
+    else:
+        st.dataframe(menu, use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.subheader("Add / Update menu item")
+    with st.form("menu_form", clear_on_submit=True):
+        name = st.text_input("Menu item name")
+        price = st.number_input("Price (NZD)", min_value=0.0, value=0.0, step=0.5)
+        active = st.checkbox("Active", value=True)
+        submit = st.form_submit_button("Save menu item")
+
+    if submit:
+        if not name.strip():
+            st.error("Menu item name is required.")
+            return
+        upsert_menu_item(name=name, price=Decimal(str(price)), active=active)
+        st.success("Saved.")
+        st.rerun()
+
+    st.divider()
+    st.subheader("Recipe builder (ingredients per 1 sale)")
+
+    items = df_items(active_only=True)
+    menu_active = df_menu(active_only=True)
+    if items.empty or menu_active.empty:
+        st.info("You need at least 1 active item AND 1 active menu item.")
+        return
+
+    mi = st.selectbox("Menu item", menu_active["name"].tolist())
+    mi_id = int(menu_active.loc[menu_active["name"] == mi, "id"].iloc[0])
+
+    # Show existing recipe
+    recipe_rows = read_sql(
+        """
+        select i.name as item, mii.qty_per_sale
+        from public.menu_item_ingredients mii
+        join public.items i on i.id = mii.item_id
+        where mii.menu_item_id = %s
+        order by i.name;
+        """,
+        (mi_id,),
+    )
+    if recipe_rows:
+        st.caption("Current recipe:")
+        st.dataframe(pd.DataFrame(recipe_rows), use_container_width=True, hide_index=True)
+    else:
+        st.caption("No ingredients set yet for this menu item.")
+
+    with st.form("recipe_form", clear_on_submit=True):
+        ing_name = st.selectbox("Ingredient item", items["name"].tolist())
+        ing_id = int(items.loc[items["name"] == ing_name, "id"].iloc[0])
+        qty_per_sale = st.number_input("Qty per sale (in the item unit)", value=0.0, step=0.1)
+        save_ing = st.form_submit_button("Save ingredient line")
+
+    if save_ing:
+        set_recipe(menu_item_id=mi_id, item_id=ing_id, qty_per_sale=Decimal(str(qty_per_sale)))
+        st.success("Saved recipe line.")
+        st.rerun()
 
 
 def page_adjust_stock():
-    st.subheader("Adjust Stock")
+    st.header("Adjust Stock")
 
-    items = load_items(active_only=True)
-    if not items:
-        st.info("Add items first in Items tab.")
+    items = df_items(active_only=True)
+    if items.empty:
+        st.info("Add items first.")
         return
 
-    locs = load_locations(active_only=True)
-    if not locs:
-        st.error("No locations found. DB init should have created them.")
-        return
+    item_name = st.selectbox("Item", items["name"].tolist())
+    item_id = int(items.loc[items["name"] == item_name, "id"].iloc[0])
 
-    item_map = {f"{r['name']} (#{r['id']})": r["id"] for r in items}
+    location = st.selectbox("Location", DEFAULT_LOCATIONS)
+    current = exec_sql(
+        "select qty from public.stocks where item_id=%s and location=%s;",
+        (item_id, location),
+        fetch="one",
+    )
+    cur_qty = float(current["qty"]) if current else 0.0
+    st.caption(f"Current qty: {cur_qty:g}")
 
-    col1, col2, col3 = st.columns([2, 1, 1])
-    with col1:
-        item_label = st.selectbox("Item", list(item_map.keys()))
-    with col2:
-        location = st.selectbox("Location", locs, index=0)
-    with col3:
-        qty = st.number_input("Qty change (+/-)", value=0.0, step=1.0)
-
-    reason = st.selectbox("Reason", ["adjust", "purchase", "transfer", "waste", "count"], index=0)
+    new_qty = st.number_input("Set new qty", value=float(cur_qty), step=1.0)
     note = st.text_input("Note (optional)")
 
-    if st.button("Record movement", type="primary"):
-        item_id = item_map[item_label]
-        exec_sql(
-            """
-            insert into public.movements(item_id, location, qty, reason, note)
-            values (%s, %s, %s, %s, %s);
-            """,
-            (item_id, location, qty, reason, note.strip() if note else None),
-        )
-        st.success("Movement recorded. Dashboard should update now.")
-        time.sleep(0.2)
+    if st.button("Save stock adjustment", type="primary"):
+        set_stock(item_id=item_id, location=location, new_qty=Decimal(str(new_qty)), note=note)
+        st.success("Stock updated.")
         st.rerun()
 
 
 def page_movements():
-    st.subheader("Movements")
-
-    rows = exec_sql(
-        """
-        select m.id, m.created_at, i.name as item, m.location, m.qty, m.reason, m.note
-        from public.movements m
-        join public.items i on i.id = m.item_id
-        order by m.created_at desc
-        limit 500;
-        """,
-        fetch="all",
-    ) or []
-
-    df = pd.DataFrame(rows)
-    st.dataframe(df, use_container_width=True, hide_index=True)
-
-
-def page_menu_admin():
-    st.subheader("Menu Admin")
-
-    rows = load_menu_items(active_only=False)
-    df = pd.DataFrame(rows) if rows else pd.DataFrame(columns=["id", "name", "price", "active", "created_at"])
-    st.dataframe(df, use_container_width=True, hide_index=True)
-
-    with st.expander("➕ Add / Update menu item", expanded=False):
-        col1, col2, col3 = st.columns([2, 1, 1])
-        with col1:
-            name = st.text_input("Menu item name", placeholder="e.g. Chicken Burger")
-        with col2:
-            price = st.number_input("Price (NZD)", min_value=0.0, value=0.0, step=0.5)
-        with col3:
-            active = st.checkbox("Active", value=True)
-
-        if st.button("Save menu item", type="primary"):
-            if not name.strip():
-                st.error("Name is required.")
-                return
-            exec_sql(
-                """
-                insert into public.menu_items(name, price, active)
-                values (%s, %s, %s);
-                """,
-                (name.strip(), price, active),
-            )
-            st.success("Saved. Refreshing…")
-            time.sleep(0.3)
-            st.rerun()
+    st.header("Movements")
+    df = df_recent_movements(limit=200)
+    if df.empty:
+        st.info("No movements yet.")
+    else:
+        st.dataframe(df, use_container_width=True, hide_index=True)
 
 
 def page_pos():
-    st.subheader("POS")
+    st.header("POS")
 
-    menu = load_menu_items(active_only=True)
-    if not menu:
-        st.info("No menu items yet. Add them in Menu Admin.")
+    menu = df_menu(active_only=True)
+    if menu.empty:
+        st.info("Add menu items in Menu Admin first.")
         return
 
-    locs = load_locations(active_only=True)
-    if not locs:
-        st.error("No locations found.")
-        return
+    col1, col2, col3, col4, col5 = st.columns([3, 1, 2, 2, 3])
 
-    menu_map = {f"{m['name']} (${float(m['price']):.2f})": m for m in menu}
-
-    col1, col2, col3, col4 = st.columns([2, 1, 1, 2])
     with col1:
-        menu_label = st.selectbox("Menu item", list(menu_map.keys()))
+        menu_name = st.selectbox("Menu item", menu["name"].tolist())
+    menu_id = int(menu.loc[menu["name"] == menu_name, "id"].iloc[0])
+    default_price = float(menu.loc[menu["name"] == menu_name, "price"].iloc[0])
+
     with col2:
         qty = st.number_input("Qty", min_value=1.0, value=1.0, step=1.0)
+
     with col3:
-        payment = st.selectbox("Payment", ["EFTPOS", "Cash", "Online"], index=0)
+        payment = st.selectbox("Payment", ["EFTPOS", "Cash", "Online", "Other"])
+
     with col4:
-        location = st.selectbox("Location", locs, index=locs.index("Food Truck") if "Food Truck" in locs else 0)
+        location = st.selectbox("Location", DEFAULT_LOCATIONS, index=0)
 
-    mi = menu_map[menu_label]
-    price_each = float(mi["price"])
-    event_name = st.text_input("Event name (optional)", placeholder="Electric Ave Day 1")
+    with col5:
+        event_name = st.text_input("Event name (optional)", placeholder="Electric Ave Day 1")
 
-    line_total = price_each * float(qty)
+    price_each = st.number_input("Price each (NZD)", min_value=0.0, value=float(default_price), step=0.5)
+    line_total = float(qty) * float(price_each)
     st.metric("Line total", f"${line_total:,.2f}")
 
     if st.button("Record sale", type="primary"):
-        exec_sql(
-            """
-            insert into public.sales(menu_item_id, menu_item_name, qty, price_each, payment, location, event_name)
-            values (%s, %s, %s, %s, %s, %s, %s);
-            """,
-            (mi["id"], mi["name"], qty, price_each, payment, location, event_name.strip() or None),
+        record_sale(
+            menu_item_id=menu_id,
+            qty=Decimal(str(qty)),
+            price_each=Decimal(str(price_each)),
+            payment=payment,
+            location=location,
+            event_name=event_name.strip() or None,
         )
-        st.success("Sale recorded.")
-        time.sleep(0.2)
+        st.success("Sale recorded (and ingredients deducted if recipe exists).")
         st.rerun()
 
 
 def page_event_mode():
-    st.subheader("Event Mode")
+    st.header("Event Mode")
 
-    st.caption("This is a simple event sales viewer. (You can build richer reporting in Supabase SQL/Charts too.)")
+    event_name = st.text_input("Event name", placeholder="Electric Ave Day 1")
+    st.caption("Tip: Use POS and fill Event name to group sales by event.")
 
-    event = st.text_input("Event name", placeholder="Electric Ave Day 1")
-    if not event.strip():
+    if not event_name.strip():
         st.info("Enter an event name to view event sales.")
         return
 
-    rows = exec_sql(
+    rows = read_sql(
         """
-        select
-          date_trunc('minute', created_at) as time,
-          menu_item_name,
-          qty,
-          (qty * price_each) as line_total,
-          payment,
-          location
-        from public.sales
-        where event_name = %s
-        order by created_at desc
-        limit 500;
+        select mi.name as menu_item, sum(s.qty) as qty, sum(s.qty*s.price_each) as revenue
+        from public.sales s
+        join public.menu_items mi on mi.id = s.menu_item_id
+        where s.event_name = %s
+        group by mi.name
+        order by revenue desc;
         """,
-        (event.strip(),),
-        fetch="all",
-    ) or []
-
-    df = pd.DataFrame(rows)
-    if df.empty:
-        st.warning("No sales found for that event name (exact match).")
+        (event_name.strip(),),
+    )
+    if not rows:
+        st.warning("No sales found for that event name yet.")
         return
 
+    df = pd.DataFrame(rows)
+    st.subheader("Event sales summary")
     st.dataframe(df, use_container_width=True, hide_index=True)
-
-    total = pd.to_numeric(df["line_total"], errors="coerce").fillna(0).sum()
-    st.metric("Event total", f"${float(total):,.2f}")
+    st.metric("Total revenue", f"${float(df['revenue'].sum()):,.2f}")
 
 
-# ---------------------------
+def page_orders():
+    st.header("Orders (below par)")
+
+    low = df_low_stock()
+    if low.empty:
+        st.success("Nothing below par right now.")
+        return
+
+    st.dataframe(low, use_container_width=True, hide_index=True)
+    st.caption("This is a simple ‘below par’ list. If you want vendor-specific ordering, we can add suppliers next.")
+
+
+# =========================
 # Main
-# ---------------------------
-
+# =========================
 def main():
     st.title(APP_TITLE)
 
-    # Init DB early so locations exist and dashboard works
-    try:
-        init_db()
-    except Exception as e:
-        st.error("DB init failed. Check DATABASE_URL and Supabase pooler settings.")
-        st.exception(e)
+    # DB init + clear guidance
+    if not DATABASE_URL:
+        st.error(
+            "DATABASE_URL not set.\n\n"
+            "In Streamlit → App settings → Secrets:\n\n"
+            '```toml\nDATABASE_URL = "postgresql://...:6543/postgres"\n```\n\n'
+            "Use Supabase **Transaction pooler** (port 6543)."
+        )
         st.stop()
 
-    with st.expander("🛠️ DB connection test", expanded=False):
+    # DB connection test box
+    with st.expander("🔧 DB connection test"):
         try:
-            c = db_counts()
+            test = exec_sql("select now() as now;", fetch="one")
             st.success("DB connected.")
-            st.write({k: c[k] for k in ["locations", "items", "movements", "menu_items", "sales"]})
-            # quick sanity
-            locs = load_locations(active_only=False)
-            st.caption(f"Locations: {locs}")
+            st.write(test)
+            st.caption("If you see DuplicatePreparedStatement errors: you are not using this patched code or prepared statements aren’t disabled.")
         except Exception as e:
-            st.error("DB test failed.")
+            st.error("DB init failed. Check DATABASE_URL and Supabase pooler settings.")
             st.exception(e)
             st.stop()
 
-    # Simple navigation
-    pages = {
-        "Dashboard": page_dashboard,
-        "Adjust Stock": page_adjust_stock,
-        "Items": page_items,
-        "Movements": page_movements,
-        "Menu Admin": page_menu_admin,
-        "POS": page_pos,
-        "Event Mode": page_event_mode,
-    }
+    # Init schema (idempotent)
+    try:
+        init_db()
+    except Exception as e:
+        st.error("DB init failed while creating tables.")
+        st.exception(e)
+        st.stop()
 
-    page = st.radio("Page", list(pages.keys()), horizontal=True, index=0)
-    st.divider()
-    pages[page]()
+    mobile_mode = st.toggle("Mobile mode", value=False)
+
+    pages = [
+        "POS",
+        "Event Mode",
+        "Orders",
+        "Dashboard",
+        "Adjust Stock",
+        "Menu Admin",
+        "Items",
+        "Movements",
+    ]
+
+    st.write("")  # spacing
+
+    if mobile_mode:
+        page = st.selectbox("Page", pages, index=pages.index("Dashboard"))
+    else:
+        page = st.radio("Page", pages, horizontal=True, index=pages.index("Dashboard"))
+
+    if page == "Dashboard":
+        page_dashboard()
+    elif page == "Items":
+        page_items()
+    elif page == "Menu Admin":
+        page_menu_admin()
+    elif page == "Adjust Stock":
+        page_adjust_stock()
+    elif page == "Movements":
+        page_movements()
+    elif page == "POS":
+        page_pos()
+    elif page == "Event Mode":
+        page_event_mode()
+    elif page == "Orders":
+        page_orders()
 
 
 if __name__ == "__main__":

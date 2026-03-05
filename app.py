@@ -128,15 +128,15 @@ def connect():
             'DATABASE_URL = "postgresql://...:6543/postgres" (Supabase transaction pooler).'
         )
 
-    # Key fix: prepare_threshold=0 (no prepared statements)
-    # Also: open/close per query (pooler-friendly)
-  psycopg.connect(
+   # Key fix: prepare_threshold=0 (no prepared statements)
+# Also: open/close per query (pooler-friendly)
+
+return psycopg.connect(
     DATABASE_URL,
     autocommit=True,
     prepare_threshold=None,
     sslmode="require",
 )
-
 
 def exec_sql(sql: str, params=None, fetch: str | None = None):
     params = params or ()

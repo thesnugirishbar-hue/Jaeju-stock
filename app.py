@@ -175,17 +175,7 @@ def connect():
         prepare_threshold=0,  # THIS DISABLES prepared statements
         sslmode="require",
         row_factory=dict_row,
-    )
-    # NOTE: pooler requires prepared statements OFF 
-    return psycopg.connect(
-        DATABASE_URL,
-        autocommit=True,
-        prepare_threshold=0,  # IMPORTANT: disables server-side prepared statements
-        sslmode="require",
-        row_factory=dict_row,
-    )
-
-
+  
 def exec_sql(sql: str, params=None, fetch: str | None = None):
     params = params or ()
     with connect() as conn:

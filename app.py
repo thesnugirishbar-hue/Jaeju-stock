@@ -211,6 +211,162 @@ def read_sql(sql: str, params=None) -> list[dict]:
 def invalidate_cache():
     st.cache_data.clear()
 
+# -------------------------
+# Stock Transfer helpers
+# -------------------------
+def create_transfer_order(from_loc: str, to_loc: str, note: str = "") -> int:
+    row = exec_sql(
+        """
+        insert into public.transfer_orders(from_location, to_location, status, note)
+        values (%s, %s, 'draft', %s)
+        returning id;
+        """,
+        (from_loc, to_loc, note.strip() or None),
+        fetch="one",
+    )
+    invalidate_cache()
+    return int(row["id"])
+
+
+def add_transfer_line(order_id: int, item_id: int, qty: Decimal):
+    exec_sql(
+        """
+        insert into public.transfer_order_lines(order_id, item_id, qty)
+        values (%s, %s, %s)
+        on conflict (order_id, item_id)
+        do update set qty = excluded.qty;
+        """,
+        (order_id, item_id, qty),
+    )
+    invalidate_cache()
+
+
+def get_transfer(order_id: int) -> dict | None:
+    row = exec_sql(
+        "select * from public.transfer_orders where id=%s;",
+        (order_id,),
+        fetch="one",
+    )
+    return row
+
+
+def get_transfer_lines(order_id: int) -> list[dict]:
+    return read_sql(
+        """
+        select l.id, l.item_id, i.name as item, i.unit, l.qty
+        from public.transfer_order_lines l
+        join public.items i on i.id = l.item_id
+        where l.order_id = %s
+        order by i.name;
+        """,
+        (order_id,),
+    )
+
+
+def submit_transfer(order_id: int):
+    exec_sql(
+        """
+        update public.transfer_orders
+        set status='submitted'
+        where id=%s and status='draft';
+        """,
+        (order_id,),
+    )
+    invalidate_cache()
+
+
+def cancel_transfer(order_id: int):
+    exec_sql(
+        """
+        update public.transfer_orders
+        set status='cancelled'
+        where id=%s and status in ('draft','submitted');
+        """,
+        (order_id,),
+    )
+    invalidate_cache()
+
+
+def fulfill_transfer(order_id: int):
+    order = get_transfer(order_id)
+    if not order:
+        raise RuntimeError("Transfer order not found.")
+    if order["status"] != "submitted":
+        raise RuntimeError("Only SUBMITTED transfers can be fulfilled.")
+
+    from_loc = order["from_location"]
+    to_loc = order["to_location"]
+    lines = get_transfer_lines(order_id)
+
+    if not lines:
+        raise RuntimeError("No lines on this transfer.")
+
+    # apply stock moves
+    for ln in lines:
+        item_id = int(ln["item_id"])
+        qty = Decimal(str(ln["qty"]))
+
+        # ensure stock rows exist
+        exec_sql(
+            """
+            insert into public.stocks(item_id, location, qty, updated_at)
+            values (%s, %s, 0, now())
+            on conflict (item_id, location) do nothing;
+            """,
+            (item_id, from_loc),
+        )
+        exec_sql(
+            """
+            insert into public.stocks(item_id, location, qty, updated_at)
+            values (%s, %s, 0, now())
+            on conflict (item_id, location) do nothing;
+            """,
+            (item_id, to_loc),
+        )
+
+        # subtract from FROM
+        exec_sql(
+            """
+            update public.stocks
+            set qty = qty - %s, updated_at = now()
+            where item_id=%s and location=%s;
+            """,
+            (qty, item_id, from_loc),
+        )
+        exec_sql(
+            """
+            insert into public.movements(item_id, location, qty_delta, reason, note)
+            values (%s, %s, %s, 'transfer_out', %s);
+            """,
+            (item_id, from_loc, -qty, f"Transfer #{order_id} to {to_loc}"),
+        )
+
+        # add to TO
+        exec_sql(
+            """
+            update public.stocks
+            set qty = qty + %s, updated_at = now()
+            where item_id=%s and location=%s;
+            """,
+            (qty, item_id, to_loc),
+        )
+        exec_sql(
+            """
+            insert into public.movements(item_id, location, qty_delta, reason, note)
+            values (%s, %s, %s, 'transfer_in', %s);
+            """,
+            (item_id, to_loc, qty, f"Transfer #{order_id} from {from_loc}"),
+        )
+
+    exec_sql(
+        """
+        update public.transfer_orders
+        set status='fulfilled', fulfilled_at=now()
+        where id=%s;
+        """,
+        (order_id,),
+    )
+    invalidate_cache()    
 
     # Ensure default locations exist
     for loc in DEFAULT_LOCATIONS:

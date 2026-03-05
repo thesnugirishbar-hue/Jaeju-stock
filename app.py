@@ -1029,13 +1029,6 @@ def main():
             st.exception(e)
             st.stop()
 
-    try:
-        init_db()
-    except Exception as e:
-        st.error("DB init failed while creating tables.")
-        st.exception(e)
-        st.stop()
-
     mobile_mode = st.toggle("Mobile mode", value=False)
 
     pages = [

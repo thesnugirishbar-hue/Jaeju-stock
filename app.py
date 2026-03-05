@@ -176,7 +176,7 @@ def connect():
         sslmode="require",
         row_factory=dict_row,
     )
-    # NOTE: pooler requires prepared statements OFF
+    # NOTE: pooler requires prepared statements OFF 
     return psycopg.connect(
         DATABASE_URL,
         autocommit=True,

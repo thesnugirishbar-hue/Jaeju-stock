@@ -8,6 +8,34 @@ import streamlit as st
 import psycopg
 from psycopg.rows import dict_row
 
+# ---------------------------
+# Helper for menu mix
+# ---------------------------
+
+def rebalance_mix(changed_key: str, keys: list[str]):
+    vals = {}
+    for k in keys:
+        vals[k] = float(st.session_state.get(k, 0.0))
+
+    changed_val = max(0.0, min(100.0, float(st.session_state.get(changed_key, 0.0))))
+    st.session_state[changed_key] = changed_val
+
+    other_keys = [k for k in keys if k != changed_key]
+    remaining = 100.0 - changed_val
+
+    if not other_keys:
+        return
+
+    other_sum = sum(vals[k] for k in other_keys)
+
+    if other_sum <= 1e-9:
+        even = remaining / len(other_keys)
+        for k in other_keys:
+            st.session_state[k] = even
+    else:
+        scale = remaining / other_sum
+        for k in other_keys:
+            st.session_state[k] = float(st.session_state.get(k, 0.0)) * scale
 
 # =========================
 # Config

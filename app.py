@@ -827,6 +827,8 @@ def main():
         page_pos()
     elif page == "Event Mode":
         page_event_mode()
+    elif page == "Prep Planner":
+        page_prep_planner()
     elif page == "Orders":
         page_orders()
 

@@ -194,6 +194,17 @@ def exec_sql(sql: str, params=None, fetch: str | None = None):
                 return cur.fetchall()
             return None
 
+def exec_schema(sql_blob: str):
+    """
+    Runs a big SQL schema safely by executing one statement at a time.
+    Fixes: 'cannot insert multiple commands into a prepared statement'
+    """
+    # Split on semicolons
+    statements = [s.strip() for s in sql_blob.split(";") if s.strip()]
+
+    # Run each statement separately
+    for stmt in statements:
+        exec_sql(stmt + ";")
 
 @st.cache_data(ttl=10)
 def read_sql(sql: str, params=None) -> list[dict]:

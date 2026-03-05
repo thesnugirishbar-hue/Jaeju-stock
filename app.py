@@ -167,12 +167,15 @@ create index if not exists idx_transfer_lines_order on public.transfer_order_lin
 # =========================
 def connect():
     if not DATABASE_URL:
-        raise RuntimeError(
-            "DATABASE_URL not set. In Streamlit secrets, use TOML:\n"
-            'DATABASE_URL = "postgresql://...:6543/postgres"\n'
-            "Use Supabase *Transaction pooler* (6543)."
-        )
+        raise RuntimeError("DATABASE_URL not set.")
 
+    return psycopg.connect(
+        DATABASE_URL,
+        autocommit=True,
+        prepare_threshold=0,   # IMPORTANT for Supabase pooler
+        sslmode="require",
+        row_factory=dict_row,
+    )
     # NOTE: pooler requires prepared statements OFF
     return psycopg.connect(
         DATABASE_URL,

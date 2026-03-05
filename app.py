@@ -173,7 +173,6 @@ def connect():
         DATABASE_URL,
         autocommit=True,
         prepare_threshold=0,  # THIS DISABLES prepared statements
-        sslmode="require",
         row_factory=dict_row,
     )
   

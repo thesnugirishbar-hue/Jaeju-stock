@@ -211,9 +211,6 @@ def invalidate_cache():
     st.cache_data.clear()
 
 
-def init_db():
-    exec_schema(SCHEMA_SQL)
-
     # Ensure default locations exist
     for loc in DEFAULT_LOCATIONS:
         exec_sql(

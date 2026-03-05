@@ -165,13 +165,13 @@ def connect():
             'DATABASE_URL="postgresql://...:6543/postgres" (Supabase pooler).'
         )
 
-    return psycopg.connect(
-        DATABASE_URL,
-        autocommit=True,
-        prepare_threshold=None,
-        sslmode="require",
-    )
-
+  return psycopg.connect(
+    DATABASE_URL,
+    autocommit=True,
+    prepare_threshold=None,
+    sslmode="require",
+    row_factory=dict_row,
+)
 def exec_sql(sql: str, params=None, fetch: str | None = None):
     params = params or ()
     with connect() as conn:

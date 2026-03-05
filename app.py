@@ -172,7 +172,7 @@ def connect():
     return psycopg.connect(
         DATABASE_URL,
         autocommit=True,
-        prepare_threshold=0,   # IMPORTANT for Supabase pooler
+        prepare_threshold=0,  # THIS DISABLES prepared statements
         sslmode="require",
         row_factory=dict_row,
     )

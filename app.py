@@ -82,16 +82,6 @@ create table if not exists public.menu_items (
   created_at timestamptz not null default now()
 );
 
--- Sales log
-create table if not exists public.sales (
-    id bigserial primary key,
-    item_id bigint not null references public.items(id) on delete cascade,
-    location text not null references public.locations(name) on delete cascade,
-    qty numeric not null,
-    sold_at timestamptz not null default now(),
-    event_name text null
-);
-
 -- Recipe / ingredient usage per menu item
 create table if not exists public.menu_item_ingredients (
   menu_item_id bigint not null references public.menu_items(id) on delete cascade,
@@ -119,6 +109,15 @@ create table if not exists public.sales (
   event_name text null
 );
 
+-- Sales log
+create table if not exists public.sales (
+    id bigserial primary key,
+    item_id bigint not null references public.items(id) on delete cascade,
+    location text not null references public.locations(name) on delete cascade,
+    qty numeric not null,
+    sold_at timestamptz not null default now(),
+    event_name text null
+);
 -- Helpful indexes
 create index if not exists idx_movements_item_time on public.movements(item_id, created_at desc);
 create index if not exists idx_sales_time on public.sales(sold_at desc);

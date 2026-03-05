@@ -170,7 +170,7 @@ def connect():
         raise RuntimeError("DATABASE_URL not set.")
 
     return psycopg.connect(
-        DATABASE_URL + "?prepared_statements=false",
+        DATABASE_URL,
         autocommit=True,
         row_factory=dict_row,
     )

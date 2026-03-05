@@ -803,6 +803,7 @@ def main():
         "Menu Admin",
         "Items",
         "Movements",
+        "Prep Planner",
     ]
 
     st.write("")  # spacing

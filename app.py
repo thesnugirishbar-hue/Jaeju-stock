@@ -179,13 +179,16 @@ def connect():
 def exec_sql(sql: str, params=None, fetch: str | None = None):
     params = params or ()
     with connect() as conn:
-        with conn.cursor() as cur:
+        with conn.cursor(binary=False) as cur:   # ← important
             cur.execute(sql, params)
+
             if fetch == "one":
                 return cur.fetchone()
+
             if fetch == "all":
                 return cur.fetchall()
-            return None
+
+    return None
 
 def exec_schema(sql_blob: str):
     """

@@ -1310,6 +1310,8 @@ def main():
         page_event_mode()
     elif page == "Prep Planner":
         page_prep_planner()
+    elif page == "Stock Transfer":
+        page_stock_transfer()
     elif page == "Orders":
         page_orders()
 

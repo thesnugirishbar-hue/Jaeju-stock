@@ -164,8 +164,7 @@ def connect():
             "DATABASE_URL not set. In Streamlit secrets, use TOML: "
             'DATABASE_URL="postgresql://...:6543/postgres" (Supabase pooler).'
         )
-
-  return psycopg.connect(
+    return psycopg.connect(
     DATABASE_URL,
     autocommit=True,
     prepare_threshold=None,

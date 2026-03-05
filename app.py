@@ -125,18 +125,15 @@ def connect():
     if not DATABASE_URL:
         raise RuntimeError(
             "DATABASE_URL not set. In Streamlit secrets, use TOML: "
-            'DATABASE_URL = "postgresql://...:6543/postgres" (Supabase transaction pooler).'
+            'DATABASE_URL="postgresql://...:6543/postgres" (Supabase pooler).'
         )
 
-   # Key fix: prepare_threshold=0 (no prepared statements)
-# Also: open/close per query (pooler-friendly)
-
-return psycopg.connect(
-    DATABASE_URL,
-    autocommit=True,
-    prepare_threshold=None,
-    sslmode="require",
-)
+    return psycopg.connect(
+        DATABASE_URL,
+        autocommit=True,
+        prepare_threshold=None,
+        sslmode="require",
+    )
 
 def exec_sql(sql: str, params=None, fetch: str | None = None):
     params = params or ()

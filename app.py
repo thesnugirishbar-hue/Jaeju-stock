@@ -687,7 +687,75 @@ def page_orders():
     st.dataframe(low, use_container_width=True, hide_index=True)
     st.caption("This is a simple ‘below par’ list. If you want vendor-specific ordering, we can add suppliers next.")
 
+def page_prep_planner():
+    st.header("Prep Planner (Turnover → Units → Ingredients)")
 
+    # ---- Menu list (name, price, session key) ----
+    menu = [
+        ("Small KFC on chips", 18.0, "mix_small"),
+        ("Large KFC on chips", 25.0, "mix_large"),
+        ("KFC burger", 17.0, "mix_kfc_burger"),
+        ("Cauliflower burger", 16.0, "mix_caul_burger"),
+        ("Bulgogi smash", 14.0, "mix_bulgogi"),
+        ("Double Bulgogi smash", 19.0, "mix_double_bulgogi"),
+        ("Chips", 9.0, "mix_chips"),
+    ]
+    keys = [k for _, _, k in menu]
+
+    # ---- Default mix (must total 100) ----
+    defaults = {
+        "mix_small": 35.0,
+        "mix_large": 25.0,
+        "mix_kfc_burger": 10.0,
+        "mix_caul_burger": 5.0,
+        "mix_bulgogi": 10.0,
+        "mix_double_bulgogi": 10.0,
+        "mix_chips": 5.0,
+    }
+    for k, v in defaults.items():
+        st.session_state.setdefault(k, v)
+
+    st.subheader("1) Target turnover")
+    target = st.number_input("Target turnover ($)", min_value=0.0, value=8000.0, step=100.0)
+
+    st.subheader("2) Menu mix (auto-balances to 100%)")
+    for label, price, key in menu:
+        st.slider(
+            f"{label} (${price:.0f})",
+            min_value=0.0,
+            max_value=100.0,
+            step=1.0,
+            key=key,
+            on_change=rebalance_mix,
+            kwargs={"changed_key": key, "keys": keys},
+        )
+
+    total_pct = sum(float(st.session_state[k]) for k in keys)
+    st.caption(f"Total: {total_pct:.0f}% (always stays at 100%)")
+
+    st.subheader("3) Estimated units sold")
+    rows = []
+    for label, price, key in menu:
+        pct = float(st.session_state[key])
+        revenue = target * (pct / 100.0)
+        units = 0.0 if price <= 0 else (revenue / price)
+        rows.append((label, price, pct, revenue, units))
+
+    st.dataframe(
+        [
+            {
+                "Item": r[0],
+                "Price": r[1],
+                "Mix %": round(r[2], 0),
+                "Revenue share ($)": round(r[3], 2),
+                "Estimated units": round(r[4], 1),
+            }
+            for r in rows
+        ],
+        use_container_width=True,
+    )
+
+    st.info("Next step: connect recipes so this outputs ingredient quantities + a draft transfer order.")
 # =========================
 # Main
 # =========================

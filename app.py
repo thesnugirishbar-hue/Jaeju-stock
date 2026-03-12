@@ -405,7 +405,7 @@ def upsert_item(name: str, unit: str, par: Decimal, active: bool):
     (name, unit, par, active),
     fetch="one",
 )
-    if row and "id" in row:
+if row and "id" in row:
         ensure_stocks_for_item(int(row["id"]))
     invalidate_cache()
 

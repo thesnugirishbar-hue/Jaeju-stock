@@ -1145,7 +1145,7 @@ def page_prep_planner():
     total_pct = sum(float(st.session_state[k]) for k in keys)
     st.caption(f"Total: {total_pct:.0f}% (always stays at 100%)")
 
-      st.subheader("3) Estimated units sold")
+    st.subheader("3) Estimated units sold")
     rows = []
     for label, price, key in menu:
         pct = float(st.session_state[key])

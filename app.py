@@ -1145,7 +1145,7 @@ def page_prep_planner():
     total_pct = sum(float(st.session_state[k]) for k in keys)
     st.caption(f"Total: {total_pct:.0f}% (always stays at 100%)")
 
-    st.subheader("3) Estimated units sold")
+      st.subheader("3) Estimated units sold")
     rows = []
     for label, price, key in menu:
         pct = float(st.session_state[key])
@@ -1167,36 +1167,38 @@ def page_prep_planner():
         use_container_width=True,
     )
 
-  recipe_rows = read_sql(
-    """
-    select
-        mii.menu_item_id,
-        mii.item_id,
-        mii.qty_per_sale,
-        i.name as item_name,
-        i.unit
-    from public.menu_item_ingredients mii
-    join public.items i on i.id = mii.item_id
-    """
-)
+    recipe_rows = read_sql(
+        """
+        select
+            mii.menu_item_id,
+            mii.item_id,
+            mii.qty_per_sale,
+            i.name as item_name,
+            i.unit
+        from public.menu_item_ingredients mii
+        join public.items i on i.id = mii.item_id
+        """
+    )
 
-menu_active = df_menu(active_only=True)
-menu_lookup = {row["name"]: int(row["id"]) for _, row in menu_active.iterrows()}
+    menu_active = df_menu(active_only=True)
+    menu_lookup = {row["name"]: int(row["id"]) for _, row in menu_active.iterrows()}
 
-ingredients = {}
+    ingredients = {}
 
-for label, price, pct, revenue, units in rows:
-    menu_id = menu_lookup.get(label)
-    if not menu_id:
-        continue
+    for label, price, pct, revenue, units in rows:
+        menu_id = menu_lookup.get(label)
+        if not menu_id:
+            continue
 
-    for r in recipe_rows:
-        if int(r["menu_item_id"]) == menu_id:
-            item = r["item_name"]
-            qty_needed = float(units) * float(r["qty_per_sale"])
+        for _, r in recipe_rows.iterrows():
+            if int(r["menu_item_id"]) == menu_id:
+                item = r["item_name"]
+                qty_needed = float(units) * float(r["qty_per_sale"])
 
-            if item not in ingredients:
-                ingredients[item] = {"qty": 0.0, "unit": r["unit"]}
+                if item not in ingredients:
+                    ingredients[item] = {"qty": 0.0, "unit": r["unit"]}
+
+                ingredients[item]["qty"] += qty_needed
 
             ingredients[item]["qty"] += qty_needed
 

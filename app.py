@@ -1167,20 +1167,20 @@ def page_prep_planner():
         use_container_width=True,
     )
 
-recipe_rows = read_sql(
-    """
-    select
-        mii.menu_item_id,
-        mii.item_id,
-        mii.qty_per_sale,
-        i.name as item_name,
-        i.unit
-    from public.menu_item_ingredients mii
-    join public.items i on i.id = mii.item_id
-    """
-)
+    recipe_rows = read_sql(
+        """
+        select
+            mii.menu_item_id,
+            mii.item_id,
+            mii.qty_per_sale,
+            i.name as item_name,
+            i.unit
+        from public.menu_item_ingredients mii
+        join public.items i on i.id = mii.item_id
+        """
+    )
 
-menu_lookup = {
+    menu_lookup = {
         "Small KFC on chips": 1,
         "Large KFC on chips": 2,
         "KFC burger": 3,
@@ -1190,23 +1190,22 @@ menu_lookup = {
         "Chips": 7,
     }
 
-ingredients = {}
+    ingredients = {}
 
-for label, price, pct, revenue, units in rows:
-    menu_id = menu_lookup.get(label)
-    if not menu_id:
-        continue
+    for label, price, pct, revenue, units in rows:
+        menu_id = menu_lookup.get(label)
+        if not menu_id:
+            continue
 
-    for r in recipe_rows:
-        if int(r["menu_item_id"]) == menu_id:
-            item = r["item_name"]
-            qty_needed = float(units) * float(r["qty_per_sale"])
+        for r in recipe_rows:
+            if int(r["menu_item_id"]) == menu_id:
+                item = r["item_name"]
+                qty_needed = float(units) * float(r["qty_per_sale"])
 
-            if item not in ingredients:
-                ingredients[item] = {"qty": 0.0, "unit": r["unit"]}
+                if item not in ingredients:
+                    ingredients[item] = {"qty": 0.0, "unit": r["unit"]}
 
-            ingredients[item]["qty"] += qty_needed
-
+                ingredients[item]["qty"] += qty_needed
     if ingredients:
         st.subheader("4) Ingredients required")
         st.dataframe(

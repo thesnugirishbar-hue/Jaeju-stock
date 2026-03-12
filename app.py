@@ -1167,7 +1167,7 @@ def page_prep_planner():
         use_container_width=True,
     )
 
-   recipe_rows = read_sql(
+  recipe_rows = read_sql(
     """
     select
         mii.menu_item_id,
@@ -1182,6 +1182,23 @@ def page_prep_planner():
 
 menu_active = df_menu(active_only=True)
 menu_lookup = {row["name"]: int(row["id"]) for _, row in menu_active.iterrows()}
+
+ingredients = {}
+
+for label, price, pct, revenue, units in rows:
+    menu_id = menu_lookup.get(label)
+    if not menu_id:
+        continue
+
+    for r in recipe_rows:
+        if int(r["menu_item_id"]) == menu_id:
+            item = r["item_name"]
+            qty_needed = float(units) * float(r["qty_per_sale"])
+
+            if item not in ingredients:
+                ingredients[item] = {"qty": 0.0, "unit": r["unit"]}
+
+            ingredients[item]["qty"] += qty_needed
 
 ingredients = {}
 

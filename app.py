@@ -1180,7 +1180,7 @@ recipe_rows = read_sql(
     """
 )
 
-    menu_lookup = {
+menu_lookup = {
         "Small KFC on chips": 1,
         "Large KFC on chips": 2,
         "KFC burger": 3,

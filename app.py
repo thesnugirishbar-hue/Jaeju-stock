@@ -1190,7 +1190,7 @@ menu_lookup = {
         "Chips": 7,
     }
 
-    ingredients = {}
+ ingredients = {}
 
   for label, price, pct, revenue, units in rows:
     menu_id = menu_lookup.get(label)

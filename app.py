@@ -392,17 +392,19 @@ def ensure_stocks_for_item(item_id: int):
 
 
 def upsert_item(name: str, unit: str, par: Decimal, active: bool):
-    row = exec_sql(
-        """
-        insert into public.items(name, unit, par, active)
-        values (%s, %s, %s, %s)
-        on conflict (name)
-        do update set unit=excluded.unit, par=excluded.par, active=excluded.active
-        returning id;
-        """,
-        (name.strip(), unit.strip(), par, active),
-        fetch="one",
-    )
+   row = exec_sql(
+    """
+    insert into public.items (name, unit, par, active)
+    values (%s, %s, %s, %s)
+    on conflict (name, unit)
+    do update set
+        par = excluded.par,
+        active = excluded.active
+    returning *;
+    """,
+    (name, unit, par, active),
+    fetch="one",
+)
     if row and "id" in row:
         ensure_stocks_for_item(int(row["id"]))
     invalidate_cache()

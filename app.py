@@ -1167,6 +1167,78 @@ def page_prep_planner():
         use_container_width=True,
     )
 
+    recipe_rows = exec_sql(
+        """
+        select
+            mr.menu_id,
+            mr.item_id,
+            mr.qty,
+            i.name as item_name,
+            i.unit
+        from public.menu_recipes mr
+        join public.items i on i.id = mr.item_id
+        """,
+        fetch="all",
+    )
+
+    menu_lookup = {
+        "Small KFC on chips": 1,
+        "Large KFC on chips": 2,
+        "KFC burger": 3,
+        "Cauliflower burger": 4,
+        "Bulgogi smash": 5,
+        "Double Bulgogi smash": 6,
+        "Chips": 7,
+    }
+
+    ingredients = {}
+
+  for label, price, pct, revenue, units in rows:
+    menu_id = menu_lookup.get(label)
+    if not menu_id:
+        continue
+
+    for r in recipe_rows:
+        if int(r[0]) == menu_id:
+
+            item = r[3]
+            qty_needed = float(units) * float(r[2])
+
+            if item not in ingredients:
+                ingredients[item] = {"qty": 0.0, "unit": r[4]}
+
+            ingredients[item]["qty"] += qty_needed
+
+    if ingredients:
+        st.subheader("4) Ingredients required")
+        st.dataframe(
+            [
+                {
+                    "Item": k,
+                    "Qty needed": round(v["qty"], 2),
+                    "Unit": v["unit"],
+                }
+                for k, v in ingredients.items()
+            ],
+            use_container_width=True,
+        )
+
+        st.subheader("5) Draft transfer order")
+        st.dataframe(
+            [
+                {
+                    "Item": k,
+                    "Transfer qty": round(v["qty"], 2),
+                    "Unit": v["unit"],
+                    "From": "Prep Kitchen",
+                    "To": "Food Truck",
+                }
+                for k, v in ingredients.items()
+            ],
+            use_container_width=True,
+        )
+    else:
+        st.info("No recipe links found yet.")
 def page_stock_transfer():
     st.header("Stock Transfer (Prep Kitchen → Food Truck)")
 

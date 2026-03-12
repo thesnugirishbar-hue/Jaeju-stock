@@ -1167,52 +1167,6 @@ def page_prep_planner():
         use_container_width=True,
     )
 
-   # calculate ingredient needs
-recipe_rows = exec_sql(
-    """
-    select
-        mr.menu_id,
-        mr.item_id,
-        mr.qty,
-        mi.name as menu_name,
-        i.name as item_name,
-        i.unit
-    from public.menu_recipes mr
-    join public.menu_items mi on mi.id = mr.menu_id
-    join public.items i on i.id = mr.item_id
-    """,
-    fetch="all",
-)
-
-ingredients = {}
-
-for label, price, pct, revenue, units in rows:
-    for r in recipe_rows:
-        if r["menu_name"] == label:
-            item = r["item_name"]
-            qty_needed = float(units) * float(r["qty"])
-
-            if item not in ingredients:
-                ingredients[item] = {"qty": 0, "unit": r["unit"]}
-
-            ingredients[item]["qty"] += qty_needed
-
-if ingredients:
-    st.subheader("4) Ingredients required")
-    st.dataframe(
-        [
-            {
-                "Item": k,
-                "Qty needed": round(v["qty"], 2),
-                "Unit": v["unit"],
-            }
-            for k, v in ingredients.items()
-        ],
-        use_container_width=True,
-    )
-else:
-    st.info("No recipe links found yet.")
-
 def page_stock_transfer():
     st.header("Stock Transfer (Prep Kitchen → Food Truck)")
 

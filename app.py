@@ -392,22 +392,24 @@ def ensure_stocks_for_item(item_id: int):
 
 
 def upsert_item(name: str, unit: str, par: Decimal, active: bool):
-   row = exec_sql(
-    """
-    insert into public.items (name, unit, par, active)
-    values (%s, %s, %s, %s)
-    on conflict (name, unit)
-    do update set
-        par = excluded.par,
-        active = excluded.active
-    returning *;
-    """,
-    (name, unit, par, active),
-    fetch="one",
-)
-if row and "id" in row:
+    row = exec_sql(
+        """
+        insert into public.items (name, unit, par, active)
+        values (%s, %s, %s, %s)
+        on conflict (name, unit)
+        do update set
+            par = excluded.par,
+            active = excluded.active
+        returning *;
+        """,
+        (name, unit, par, active),
+        fetch="one",
+    )
+
+    if row and "id" in row:
         ensure_stocks_for_item(int(row["id"]))
-    invalidate_cache()
+        invalidate_cache()
+        return row
 
 
 def add_stock_delta(item_id: int, location: str, qty_delta: Decimal, reason: str, note: str | None = None):

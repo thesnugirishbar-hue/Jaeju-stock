@@ -1167,19 +1167,18 @@ def page_prep_planner():
         use_container_width=True,
     )
 
-    recipe_rows = exec_sql(
-        """
-        select
-            mr.menu_id,
-            mr.item_id,
-            mr.qty,
-            i.name as item_name,
-            i.unit
-        from public.menu_recipes mr
-        join public.items i on i.id = mr.item_id
-        """,
-        fetch="all",
-    )
+recipe_rows = read_sql(
+    """
+    select
+        mii.menu_item_id,
+        mii.item_id,
+        mii.qty_per_sale,
+        i.name as item_name,
+        i.unit
+    from public.menu_item_ingredients mii
+    join public.items i on i.id = mii.item_id
+    """
+)
 
     menu_lookup = {
         "Small KFC on chips": 1,
@@ -1202,12 +1201,12 @@ def page_prep_planner():
         if int(r[0]) == menu_id:
 
             item = r[3]
-            qty_needed = float(units) * float(r[2])
+            qty_needed = float(units) * float(r["qty_per_sale"])
 
             if item not in ingredients:
                 ingredients[item] = {"qty": 0.0, "unit": r[4]}
 
-            ingredients[item]["qty"] += qty_needed
+           ingredients[item] = {"qty": 0.0, "unit": r["unit"]}
 
     if ingredients:
         st.subheader("4) Ingredients required")

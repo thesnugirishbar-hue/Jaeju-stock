@@ -1192,7 +1192,7 @@ menu_lookup = {
 
 ingredients = {}
 
-  for label, price, pct, revenue, units in rows:
+   for label, price, pct, revenue, units in rows:
     menu_id = menu_lookup.get(label)
     if not menu_id:
         continue

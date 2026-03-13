@@ -1102,19 +1102,19 @@ def page_orders():
 
 
 def page_prep_planner():
-    st.header("Prep Planner (Turnover → Units → Ingredients)")
+    st.header("Prep Planner")
 
+    # Load active menu items from DB so the planner always matches real menu items
     menu_df = df_menu(active_only=True)
 
-    if menu_df.empty:
+    if menu_df is None or len(menu_df) == 0:
         st.info("Add active menu items first.")
         return
 
-    # Keep only menu items with name + price
     menu_df = menu_df.copy()
-    menu_df = menu_df[["id", "name", "price"]].dropna(subset=["name", "price"])
+    menu_df = menu_df[["id", "name", "price"]].dropna(subset=["id", "name", "price"])
 
-    if menu_df.empty:
+    if len(menu_df) == 0:
         st.info("No active menu items with prices found.")
         return
 
@@ -1127,28 +1127,31 @@ def page_prep_planner():
         key="prep_target_turnover",
     )
 
-    # Stable slider keys by menu item id so values persist between page changes
-    defaults = {}
+    # Persist mix sliders between page changes
+    default_keys = []
     for _, row in menu_df.iterrows():
         slider_key = f"prep_mix_{int(row['id'])}"
-        defaults[slider_key] = 0.0
+        default_keys.append(slider_key)
+        if slider_key not in st.session_state:
+            st.session_state[slider_key] = 0.0
 
-    # Optional default if you want one item to start at 100%
-    if not any(k in st.session_state for k in defaults.keys()):
-        first_key = list(defaults.keys())[0]
-        defaults[first_key] = 100.0
-
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
+    # First load only: put first menu item at 100%
+    if "prep_mix_initialized" not in st.session_state:
+        if len(menu_df) > 0:
+            first_id = int(menu_df.iloc[0]["id"])
+            st.session_state[f"prep_mix_{first_id}"] = 100.0
+        st.session_state["prep_mix_initialized"] = True
 
     col1, col2 = st.columns([3, 1])
     with col1:
         st.subheader("2) Menu mix")
     with col2:
         if st.button("Reset mix"):
-            for k, v in defaults.items():
-                st.session_state[k] = v
+            for k in default_keys:
+                st.session_state[k] = 0.0
+            if len(menu_df) > 0:
+                first_id = int(menu_df.iloc[0]["id"])
+                st.session_state[f"prep_mix_{first_id}"] = 100.0
             st.rerun()
 
     rows = []
@@ -1161,7 +1164,7 @@ def page_prep_planner():
         slider_key = f"prep_mix_{menu_id}"
 
         pct = st.slider(
-            f"{name} (${price:.0f})",
+            f"{name} (${price:.2f})",
             min_value=0.0,
             max_value=100.0,
             step=1.0,
@@ -1170,10 +1173,11 @@ def page_prep_planner():
 
         total_pct += pct
         revenue = target * (pct / 100.0)
-        units = 0.0 if price <= 0 else (revenue / price)
+        units = (revenue / price) if price > 0 else 0.0
+
         rows.append((menu_id, name, price, pct, revenue, units))
 
-    st.caption(f"Total: {total_pct:.0f}% (always stays at 100% only if you set it that way)")
+    st.caption(f"Total mix: {total_pct:.0f}%")
     if round(total_pct, 0) != 100:
         st.warning("Menu mix should total 100% for accurate prep planning.")
 
@@ -1182,7 +1186,7 @@ def page_prep_planner():
         [
             {
                 "Item": name,
-                "Price": price,
+                "Price": round(price, 2),
                 "Mix %": round(pct, 0),
                 "Revenue share ($)": round(revenue, 2),
                 "Estimated units": round(units, 1),
@@ -1193,39 +1197,39 @@ def page_prep_planner():
         hide_index=True,
     )
 
-    # Read recipe lines from the same table used by your recipe builder
+    # Use the same recipe table as Menu Admin / Recipe Builder
     recipe_rows = read_sql(
-    """
-    select
-        mii.menu_item_id,
-        mii.item_id,
-        mii.qty_per_sale,
-        i.name as item_name,
-        i.unit
-    from public.menu_item_ingredients mii
-    join public.items i on i.id = mii.item_id
-    order by mii.menu_item_id, i.name
-    """
-)
+        """
+        select
+            mii.menu_item_id,
+            mii.item_id,
+            mii.qty_per_sale,
+            i.name as item_name,
+            i.unit
+        from public.menu_item_ingredients mii
+        join public.items i on i.id = mii.item_id
+        order by mii.menu_item_id, i.name
+        """
+    )
 
-if not recipe_rows:
-    st.info("No recipe links found yet. Add recipe rows in Menu Admin / Recipe Builder.")
-    return
-       
+    if not recipe_rows:
+        st.info("No recipe links found yet. Add recipe rows in Menu Admin / Recipe Builder.")
+        return
+
     ingredients = {}
 
-for menu_id, name, price, pct, revenue, units in rows:
-    for r in recipe_rows:
-        if int(r["menu_item_id"]) == menu_id:
-            item_name = str(r["item_name"])
-            unit = str(r["unit"])
-            qty_per_sale = float(r["qty_per_sale"])
-            qty_needed = float(units) * qty_per_sale
+    for menu_id, name, price, pct, revenue, units in rows:
+        for r in recipe_rows:
+            if int(r["menu_item_id"]) == menu_id:
+                item_name = str(r["item_name"])
+                unit = str(r["unit"])
+                qty_per_sale = float(r["qty_per_sale"])
+                qty_needed = float(units) * qty_per_sale
 
-            if item_name not in ingredients:
-                ingredients[item_name] = {"qty": 0.0, "unit": unit}
+                if item_name not in ingredients:
+                    ingredients[item_name] = {"qty": 0.0, "unit": unit}
 
-            ingredients[item_name]["qty"] += qty_needed
+                ingredients[item_name]["qty"] += qty_needed
 
     if not ingredients:
         st.info("No recipe links matched your active menu items.")
@@ -1254,7 +1258,6 @@ for menu_id, name, price, pct, revenue, units in rows:
         for item, vals in sorted(ingredients.items())
     ]
     st.dataframe(transfer_rows, use_container_width=True, hide_index=True)
-
 def page_stock_transfer():
     st.header("Stock Transfer (Prep Kitchen → Food Truck)")
 

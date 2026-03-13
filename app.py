@@ -8,6 +8,13 @@ import streamlit as st
 import psycopg
 from psycopg.rows import dict_row
 
+from io import BytesIO
+from datetime import datetime
+
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.units import mm
+from reportlab.pdfgen import canvas
+
 # =========================
 # Config
 # =========================
@@ -1135,13 +1142,10 @@ def page_prep_planner():
         if slider_key not in st.session_state:
             st.session_state[slider_key] = 0.0
 
-    # First load only: put first menu item at 100%
-    if "prep_mix_initialized" not in st.session_state:
-        if len(menu_df) > 0:
-            first_id = int(menu_df.iloc[0]["id"])
-            st.session_state[f"prep_mix_{first_id}"] = 100.0
-        st.session_state["prep_mix_initialized"] = True
-
+   if "prep_mix_initialized" not in st.session_state:
+    for k in default_keys:
+        st.session_state[k] = 0.0
+    st.session_state["prep_mix_initialized"] = True
     col1, col2 = st.columns([3, 1])
     with col1:
         st.subheader("2) Menu mix")
@@ -1150,8 +1154,7 @@ def page_prep_planner():
             for k in default_keys:
                 st.session_state[k] = 0.0
             if len(menu_df) > 0:
-                first_id = int(menu_df.iloc[0]["id"])
-                st.session_state[f"prep_mix_{first_id}"] = 100.0
+             
             st.rerun()
 
     rows = []

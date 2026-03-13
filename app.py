@@ -1195,20 +1195,20 @@ def page_prep_planner():
 
     # Read recipe lines from the same table used by your recipe builder
     recipe_rows = read_sql(
-        """
-        select
-            mii.menu_item_id,
-            mii.item_id,
-            mii.qty_per_sale,
-            i.name as item_name,
-            i.unit
-        from public.menu_item_ingredients mii
-        join public.items i on i.id = mii.item_id
-        order by mii.menu_item_id, i.name
-        """
-    )
+    """
+    select
+        mii.menu_item_id,
+        mii.item_id,
+        mii.qty_per_sale,
+        i.name as item_name,
+        i.unit
+    from public.menu_item_ingredients mii
+    join public.items i on i.id = mii.item_id
+    order by mii.menu_item_id, i.name
+    """
+)
 
-    if not recipe_rows:
+if not recipe_rows:
     st.info("No recipe links found yet. Add recipe rows in Menu Admin / Recipe Builder.")
     return
        

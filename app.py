@@ -1214,10 +1214,9 @@ def page_prep_planner():
        
     ingredients = {}
 
-    for menu_id, name, price, pct, revenue, units in rows:
-        matched = recipe_rows[recipe_rows["menu_item_id"] == menu_id]
-
-        for _, r in matched.iterrows():
+for menu_id, name, price, pct, revenue, units in rows:
+    for r in recipe_rows:
+        if int(r["menu_item_id"]) == menu_id:
             item_name = str(r["item_name"])
             unit = str(r["unit"])
             qty_per_sale = float(r["qty_per_sale"])

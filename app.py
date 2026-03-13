@@ -1208,10 +1208,10 @@ def page_prep_planner():
         """
     )
 
-    if recipe_rows is None or recipe_rows.empty:
-        st.info("No recipe links found yet. Add recipe rows in Menu Admin / Recipe Builder.")
-        return
-
+   if not recipe_rows:
+    st.info("No recipe links found yet. Add recipe rows in Menu Admin / Recipe Builder.")
+    return
+       
     ingredients = {}
 
     for menu_id, name, price, pct, revenue, units in rows:

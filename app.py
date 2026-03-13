@@ -23,6 +23,157 @@ DEFAULT_LOCATIONS = ["Food Truck", "Prep Kitchen"]
 
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 
+PREP_PRESETS = {
+    "Market": {
+        "small kfc on chips": 35,
+        "large kfc on chips": 25,
+        "kfc burger": 10,
+        "cauliflower burger": 5,
+        "bulgogi smash burger": 10,
+        "double bulgogi smash burger": 10,
+        "just chicken": 0,
+        "chips": 5,
+    },
+    "Event": {
+        "small kfc on chips": 25,
+        "large kfc on chips": 30,
+        "kfc burger": 15,
+        "cauliflower burger": 5,
+        "bulgogi smash burger": 10,
+        "double bulgogi smash burger": 5,
+        "just chicken": 5,
+        "chips": 5,
+    },
+    "Catering": {
+        "small kfc on chips": 10,
+        "large kfc on chips": 20,
+        "kfc burger": 15,
+        "cauliflower burger": 10,
+        "bulgogi smash burger": 15,
+        "double bulgogi smash burger": 10,
+        "just chicken": 15,
+        "chips": 5,
+    },
+}
+
+
+def _prep_slider_keys(menu_df):
+    return [f"prep_mix_{int(row['id'])}" for _, row in menu_df.iterrows()]
+
+
+def _rebalance_mix(changed_key: str, all_keys: list[str]):
+    changed_val = float(st.session_state.get(changed_key, 0.0))
+    changed_val = max(0.0, min(100.0, changed_val))
+    st.session_state[changed_key] = changed_val
+
+    other_keys = [k for k in all_keys if k != changed_key]
+    if not other_keys:
+        return
+
+    remaining = max(0.0, 100.0 - changed_val)
+    other_total = sum(float(st.session_state.get(k, 0.0)) for k in other_keys)
+
+    if other_total <= 0:
+        base = int(remaining // len(other_keys))
+        remainder = int(remaining - (base * len(other_keys)))
+        for i, k in enumerate(other_keys):
+            st.session_state[k] = float(base + (1 if i < remainder else 0))
+        return
+
+    new_vals = []
+    running = 0
+    for i, k in enumerate(other_keys):
+        if i < len(other_keys) - 1:
+            v = int(round(remaining * (float(st.session_state.get(k, 0.0)) / other_total)))
+            new_vals.append(v)
+            running += v
+        else:
+            new_vals.append(int(max(0, round(remaining - running))))
+
+    diff = int(round(remaining - sum(new_vals)))
+    if new_vals:
+        new_vals[-1] += diff
+
+    for k, v in zip(other_keys, new_vals):
+        st.session_state[k] = float(max(0, v))
+
+
+def _apply_prep_preset(menu_df, preset_name: str):
+    preset = PREP_PRESETS.get(preset_name, {})
+    for _, row in menu_df.iterrows():
+        key = f"prep_mix_{int(row['id'])}"
+        item_name = str(row["name"]).strip().lower()
+        st.session_state[key] = float(preset.get(item_name, 0.0))
+
+
+def _build_prep_pdf(target, mix_rows, ingredient_rows, transfer_rows) -> bytes:
+    buf = BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    width, height = A4
+
+    y = height - 20 * mm
+    left = 15 * mm
+
+    def line(text, size=10, step=6):
+        nonlocal y
+        c.setFont("Helvetica", size)
+        c.drawString(left, y, text)
+        y -= step * mm
+        if y < 20 * mm:
+            c.showPage()
+            y = height - 20 * mm
+
+    c.setTitle("JAEJU Prep Plan")
+    line("JAEJU Prep Plan", 14, 8)
+    line(datetime.now().strftime("%d %b %Y %H:%M"), 9, 6)
+    line(f"Target turnover: ${target:,.2f}", 10, 8)
+
+    line("Menu Mix / Estimated Units", 12, 7)
+    for r in mix_rows:
+        line(
+            f"{r['Item']}: {r['Mix %']:.0f}% | ${r['Revenue share ($)']:.2f} | {r['Estimated units']:.1f} units",
+            9,
+            5,
+        )
+
+    y -= 2 * mm
+    line("Ingredients Required", 12, 7)
+    for r in ingredient_rows:
+        line(f"{r['Item']}: {r['Qty needed']:.2f} {r['Unit']}", 9, 5)
+
+    y -= 2 * mm
+    line("Draft Transfer Order", 12, 7)
+    for r in transfer_rows:
+        line(
+            f"{r['Item']}: {r['Transfer qty']:.2f} {r['Unit']} | {r['From']} -> {r['To']}",
+            9,
+            5,
+        )
+
+    c.save()
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def _create_transfer_from_plan(ingredient_rows, from_loc: str, to_loc: str, note: str):
+    """
+    Assumes your existing app already has create_transfer_order() and exec_sql().
+    If your transfer_order_lines foreign key column is named order_id instead of transfer_order_id,
+    change that one column below.
+    """
+    new_id = create_transfer_order(from_loc, to_loc, note)
+
+    for r in ingredient_rows:
+        exec_sql(
+            """
+            insert into public.transfer_order_lines (transfer_order_id, item_id, qty)
+            values (%s, %s, %s)
+            """,
+            (new_id, int(r["item_id"]), float(r["Transfer qty"])),
+        )
+
+    return new_id
+
 # =========================
 # Helper for menu mix
 # =========================

@@ -1183,9 +1183,9 @@ def page_prep_planner():
     menu_active = df_menu(active_only=True)
     menu_lookup = {row["name"]: int(row["id"]) for _, row in menu_active.iterrows()}
 
-ingredients = {}
+   ingredients = {}
 
-for label, price, pct, revenue, units in rows:
+    for label, price, pct, revenue, units in rows:
     menu_id = menu_lookup.get(label)
     if not menu_id:
         continue

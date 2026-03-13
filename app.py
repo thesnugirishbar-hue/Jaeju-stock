@@ -1104,69 +1104,96 @@ def page_orders():
 def page_prep_planner():
     st.header("Prep Planner (Turnover → Units → Ingredients)")
 
-    menu = [
-        ("Small KFC on chips", 18.0, "mix_small"),
-        ("Large KFC on chips", 25.0, "mix_large"),
-        ("KFC burger", 17.0, "mix_kfc_burger"),
-        ("Cauliflower burger", 16.0, "mix_caul_burger"),
-        ("Bulgogi smash", 14.0, "mix_bulgogi"),
-        ("Double Bulgogi smash", 19.0, "mix_double_bulgogi"),
-        ("Chips", 9.0, "mix_chips"),
-    ]
-    keys = [k for _, _, k in menu]
+    menu_df = df_menu(active_only=True)
 
-    defaults = {
-        "mix_small": 35.0,
-        "mix_large": 25.0,
-        "mix_kfc_burger": 10.0,
-        "mix_caul_burger": 5.0,
-        "mix_bulgogi": 10.0,
-        "mix_double_bulgogi": 10.0,
-        "mix_chips": 5.0,
-    }
-    for k, v in defaults.items():
-        st.session_state.setdefault(k, v)
+    if menu_df.empty:
+        st.info("Add active menu items first.")
+        return
+
+    # Keep only menu items with name + price
+    menu_df = menu_df.copy()
+    menu_df = menu_df[["id", "name", "price"]].dropna(subset=["name", "price"])
+
+    if menu_df.empty:
+        st.info("No active menu items with prices found.")
+        return
 
     st.subheader("1) Target turnover")
-    target = st.number_input("Target turnover ($)", min_value=0.0, value=8000.0, step=100.0)
+    target = st.number_input(
+        "Target turnover ($)",
+        min_value=0.0,
+        value=float(st.session_state.get("prep_target_turnover", 8000.0)),
+        step=100.0,
+        key="prep_target_turnover",
+    )
 
-    st.subheader("2) Menu mix (auto-balances to 100%)")
-    for label, price, key in menu:
-        st.slider(
-            f"{label} (${price:.0f})",
+    # Stable slider keys by menu item id so values persist between page changes
+    defaults = {}
+    for _, row in menu_df.iterrows():
+        slider_key = f"prep_mix_{int(row['id'])}"
+        defaults[slider_key] = 0.0
+
+    # Optional default if you want one item to start at 100%
+    if not any(k in st.session_state for k in defaults.keys()):
+        first_key = list(defaults.keys())[0]
+        defaults[first_key] = 100.0
+
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.subheader("2) Menu mix")
+    with col2:
+        if st.button("Reset mix"):
+            for k, v in defaults.items():
+                st.session_state[k] = v
+            st.rerun()
+
+    rows = []
+    total_pct = 0.0
+
+    for _, row in menu_df.iterrows():
+        menu_id = int(row["id"])
+        name = str(row["name"])
+        price = float(row["price"])
+        slider_key = f"prep_mix_{menu_id}"
+
+        pct = st.slider(
+            f"{name} (${price:.0f})",
             min_value=0.0,
             max_value=100.0,
             step=1.0,
-            key=key,
-            on_change=rebalance_mix,
-            kwargs={"changed_key": key, "keys": keys},
+            key=slider_key,
         )
 
-    total_pct = sum(float(st.session_state[k]) for k in keys)
-    st.caption(f"Total: {total_pct:.0f}% (always stays at 100%)")
-
-    st.subheader("3) Estimated units sold")
-    rows = []
-    for label, price, key in menu:
-        pct = float(st.session_state[key])
+        total_pct += pct
         revenue = target * (pct / 100.0)
         units = 0.0 if price <= 0 else (revenue / price)
-        rows.append((label, price, pct, revenue, units))
+        rows.append((menu_id, name, price, pct, revenue, units))
 
+    st.caption(f"Total: {total_pct:.0f}% (always stays at 100% only if you set it that way)")
+    if round(total_pct, 0) != 100:
+        st.warning("Menu mix should total 100% for accurate prep planning.")
+
+    st.subheader("3) Estimated units sold")
     st.dataframe(
         [
             {
-                "Item": r[0],
-                "Price": r[1],
-                "Mix %": round(r[2], 0),
-                "Revenue share ($)": round(r[3], 2),
-                "Estimated units": round(r[4], 1),
+                "Item": name,
+                "Price": price,
+                "Mix %": round(pct, 0),
+                "Revenue share ($)": round(revenue, 2),
+                "Estimated units": round(units, 1),
             }
-            for r in rows
+            for menu_id, name, price, pct, revenue, units in rows
         ],
         use_container_width=True,
+        hide_index=True,
     )
 
+    # Read recipe lines from the same table used by your recipe builder
     recipe_rows = read_sql(
         """
         select
@@ -1177,62 +1204,57 @@ def page_prep_planner():
             i.unit
         from public.menu_item_ingredients mii
         join public.items i on i.id = mii.item_id
+        order by mii.menu_item_id, i.name
         """
     )
 
-    menu_active = df_menu(active_only=True)
-    menu_lookup = {row["name"]: int(row["id"]) for _, row in menu_active.iterrows()}
+    if recipe_rows is None or recipe_rows.empty:
+        st.info("No recipe links found yet. Add recipe rows in Menu Admin / Recipe Builder.")
+        return
 
     ingredients = {}
 
-    for label, price, pct, revenue, units in rows:
-        menu_id = menu_lookup.get(label)
-        if not menu_id:
-            continue
+    for menu_id, name, price, pct, revenue, units in rows:
+        matched = recipe_rows[recipe_rows["menu_item_id"] == menu_id]
 
-        for r in recipe_rows:
-            if int(r["menu_item_id"]) != menu_id:
-                continue
+        for _, r in matched.iterrows():
+            item_name = str(r["item_name"])
+            unit = str(r["unit"])
+            qty_per_sale = float(r["qty_per_sale"])
+            qty_needed = float(units) * qty_per_sale
 
-            item = r["item_name"]
-            qty_needed = float(units) * float(r["qty_per_sale"])
+            if item_name not in ingredients:
+                ingredients[item_name] = {"qty": 0.0, "unit": unit}
 
-            if item not in ingredients:
-                ingredients[item] = {"qty": 0.0, "unit": r["unit"]}
+            ingredients[item_name]["qty"] += qty_needed
 
-            ingredients[item]["qty"] += qty_needed
+    if not ingredients:
+        st.info("No recipe links matched your active menu items.")
+        return
 
-    if ingredients:
-        st.subheader("4) Ingredients required")
-        st.dataframe(
-            [
-                {
-                    "Item": k,
-                    "Qty needed": round(v["qty"], 2),
-                    "Unit": v["unit"],
-                }
-                for k, v in ingredients.items()
-            ],
-            use_container_width=True,
-        )
+    st.subheader("4) Ingredients required")
+    ingredient_rows = [
+        {
+            "Item": item,
+            "Qty needed": round(vals["qty"], 2),
+            "Unit": vals["unit"],
+        }
+        for item, vals in sorted(ingredients.items())
+    ]
+    st.dataframe(ingredient_rows, use_container_width=True, hide_index=True)
 
-        st.subheader("5) Draft transfer order")
-        st.dataframe(
-            [
-                {
-                    "Item": k,
-                    "Transfer qty": round(v["qty"], 2),
-                    "Unit": v["unit"],
-                    "From": "Prep Kitchen",
-                    "To": "Food Truck",
-                }
-                for k, v in ingredients.items()
-            ],
-            use_container_width=True,
-        )
-    else:
-        st.info("No recipe links found yet.")
-
+    st.subheader("5) Draft transfer order")
+    transfer_rows = [
+        {
+            "Item": item,
+            "Transfer qty": round(vals["qty"], 2),
+            "Unit": vals["unit"],
+            "From": "Prep Kitchen",
+            "To": "Food Truck",
+        }
+        for item, vals in sorted(ingredients.items())
+    ]
+    st.dataframe(transfer_rows, use_container_width=True, hide_index=True)
 
 def page_stock_transfer():
     st.header("Stock Transfer (Prep Kitchen → Food Truck)")

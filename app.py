@@ -1208,7 +1208,7 @@ def page_prep_planner():
         """
     )
 
-   if not recipe_rows:
+    if not recipe_rows:
     st.info("No recipe links found yet. Add recipe rows in Menu Admin / Recipe Builder.")
     return
        

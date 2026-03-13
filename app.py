@@ -1167,7 +1167,7 @@ def page_prep_planner():
         use_container_width=True,
     )
 
-        recipe_rows = read_sql(
+    recipe_rows = read_sql(
         """
         select
             mii.menu_item_id,

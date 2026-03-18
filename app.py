@@ -1141,7 +1141,7 @@ def page_orders():
     st.session_state.setdefault("transfer_cart",[])
     tab1, tab2, tab3 = st.tabs(["Create transfer (Prep → Truck)", "Receive transfer", "Below par list"])
 
-    items = df_items(active_only=True)
+items = df_items(active_only=True)
 tab1, tab2 = st.tabs(["Create Order", "Receive Order"])
 
 with tab1:

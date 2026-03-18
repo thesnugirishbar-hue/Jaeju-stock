@@ -1147,27 +1147,32 @@ def page_orders():
         st.subheader("Create transfer order")
         if items.empty:
             st.info("Add items first.")
-        else:
-            st.caption("Build an order in the prep kitchen, then receive it into the truck (stock transfer).")
+    else:
+    st.caption("Build an order in the prep kitchen, then receive it into the truck")
 
-     if "tr_from_loc" not in st.session_state:
-    st.session_state["tr_from_loc"] = "Prep Kitchen"
+    if "tr_from_loc" not in st.session_state:
+        st.session_state["tr_from_loc"] = "Prep Kitchen"
 
-from_location = st.selectbox(
-    "From location",
-    DEFAULT_LOCATIONS,
-    key="tr_from_loc",
-)
+    from_location = st.selectbox(
+        "From location",
+        DEFAULT_LOCATIONS,
+        key="tr_from_loc",
+    )
 
-if "tr_to_loc" not in st.session_state:
-    st.session_state["tr_to_loc"] = "Food Truck"
+    if "tr_to_loc" not in st.session_state:
+        st.session_state["tr_to_loc"] = "Food Truck"
 
-to_location = st.selectbox(
-    "To location",
-    DEFAULT_LOCATIONS,
-    key="tr_to_loc",
-)
-            note = st.text_input("Note (optional)", key="tr_note", placeholder="Electric Ave Day 1 restock")
+    to_location = st.selectbox(
+        "To location",
+        DEFAULT_LOCATIONS,
+        key="tr_to_loc",
+    )
+
+    note = st.text_input(
+        "Note (optional)",
+        key="tr_note",
+        placeholder="Electric Ave Day 1 restock"
+    )
 
             st.write("")
 

@@ -1150,7 +1150,7 @@ def page_orders():
         else:
             st.caption("Build an order in the prep kitchen, then receive it into the truck (stock transfer).")
 
-    if "tr_from_loc" not in st.session_state:
+     if "tr_from_loc" not in st.session_state:
     st.session_state["tr_from_loc"] = "Prep Kitchen"
 
 from_location = st.selectbox(

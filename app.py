@@ -1145,6 +1145,7 @@ def page_orders():
 
 with tab1:
     st.subheader("Create transfer order")
+
     if items.empty:
         st.info("Add items first.")
     else:
@@ -1176,19 +1177,37 @@ with tab1:
 
         st.write("")
 
-            # cart stored in session
-            st.session_state.setdefault("transfer_cart", [])  # list of dicts {item_id, item, unit, qty}
+        # cart stored in session
+        st.session_state.setdefault("transfer_cart", [])
 
-            c1, c2, c3 = st.columns([3, 1, 2])
-            with c1:
-                item_name = st.selectbox("Item", items["name"].tolist(), key="tr_item_pick")
-            with c2:
-                qty = st.number_input("Qty", min_value=0.0, value=0.0, step=1.0, key="tr_qty_pick")
-            with c3:
-                st.write("")
-                st.write("")
-                add_btn = st.button("Add line", type="primary")
+        c1, c2, c3 = st.columns([3, 1, 2])
 
+        with c1:
+            item_name = st.selectbox(
+                "Item",
+                items["name"].tolist(),
+                key="tr_item_pick"
+            )
+
+        with c2:
+            qty = st.number_input(
+                "Qty",
+                min_value=0.0,
+                value=0.0,
+                step=1.0,
+                key="tr_qty_pick"
+            )
+
+        with c3:
+            st.write("")
+            st.write("")
+            add_btn = st.button("Add line", type="primary")
+
+        if add_btn:
+            if qty <= 0:
+                st.error("Qty must be > 0")
+            else:
+                st.success("Line added")
             if add_btn:
                 if qty <= 0:
                     st.error("Qty must be > 0")

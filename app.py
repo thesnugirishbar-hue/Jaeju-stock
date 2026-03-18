@@ -55,134 +55,6 @@ PREP_PRESETS = {
 
 
 # =========================
-# Prep planner helpers
-# =========================
-def _prep_slider_keys(menu_df):
-    return [f"prep_mix_{int(row['id'])}" for _, row in menu_df.iterrows()]
-
-
-def _rebalance_mix(changed_key: str, all_keys: list[str]):
-    changed_val = float(st.session_state.get(changed_key, 0.0))
-    changed_val = max(0.0, min(100.0, changed_val))
-    st.session_state[changed_key] = changed_val
-
-    other_keys = [k for k in all_keys if k != changed_key]
-    if not other_keys:
-        return
-
-    remaining = max(0.0, 100.0 - changed_val)
-    other_total = sum(float(st.session_state.get(k, 0.0)) for k in other_keys)
-
-    if other_total <= 0:
-        base = int(remaining // len(other_keys))
-        remainder = int(remaining - (base * len(other_keys)))
-        for i, k in enumerate(other_keys):
-            st.session_state[k] = float(base + (1 if i < remainder else 0))
-        return
-
-    new_vals = []
-    running = 0
-    for i, k in enumerate(other_keys):
-        if i < len(other_keys) - 1:
-            v = int(round(remaining * (float(st.session_state.get(k, 0.0)) / other_total)))
-            new_vals.append(v)
-            running += v
-        else:
-            new_vals.append(int(max(0, round(remaining - running))))
-
-    diff = int(round(remaining - sum(new_vals)))
-    if new_vals:
-        new_vals[-1] += diff
-
-    for k, v in zip(other_keys, new_vals):
-        st.session_state[k] = float(max(0, v))
-
-
-def _apply_prep_preset(menu_df, preset_name: str):
-    preset = PREP_PRESETS.get(preset_name, {})
-    for _, row in menu_df.iterrows():
-        key = f"prep_mix_{int(row['id'])}"
-        item_name = str(row["name"]).strip().lower()
-        st.session_state[key] = float(preset.get(item_name, 0.0))
-
-
-def _build_prep_pdf(target, mix_rows, ingredient_rows, transfer_rows) -> bytes:
-    buf = BytesIO()
-    c = canvas.Canvas(buf, pagesize=A4)
-    width, height = A4
-
-    y = height - 20 * mm
-    left = 15 * mm
-
-    def line(text, size=10, step=6):
-        nonlocal y
-        c.setFont("Helvetica", size)
-        c.drawString(left, y, text)
-        y -= step * mm
-        if y < 20 * mm:
-            c.showPage()
-            y = height - 20 * mm
-
-    c.setTitle("JAEJU Prep Plan")
-    line("JAEJU Prep Plan", 14, 8)
-    line(datetime.now().strftime("%d %b %Y %H:%M"), 9, 6)
-    line(f"Target turnover: ${target:,.2f}", 10, 8)
-
-    line("Menu Mix / Estimated Units", 12, 7)
-    for r in mix_rows:
-        line(
-            f"{r['Item']}: {r['Mix %']:.0f}% | ${r['Revenue share ($)']:.2f} | {r['Estimated units']:.1f} units",
-            9,
-            5,
-        )
-
-    y -= 2 * mm
-    line("Ingredients Required", 12, 7)
-    for r in ingredient_rows:
-        line(f"{r['Item']}: {r['Qty needed']:.2f} {r['Unit']}", 9, 5)
-
-    y -= 2 * mm
-    line("Draft Transfer Order", 12, 7)
-    for r in transfer_rows:
-        line(
-            f"{r['Item']}: {r['Transfer qty']:.2f} {r['Unit']} | {r['From']} -> {r['To']}",
-            9,
-            5,
-        )
-
-    c.save()
-    buf.seek(0)
-    return buf.getvalue()
-
-
-# =========================
-# Helper for menu mix
-# =========================
-def rebalance_mix(changed_key: str, keys: list[str]):
-    vals = {k: float(st.session_state.get(k, 0.0)) for k in keys}
-
-    changed_val = max(0.0, min(100.0, float(st.session_state.get(changed_key, 0.0))))
-    st.session_state[changed_key] = changed_val
-
-    other_keys = [k for k in keys if k != changed_key]
-    remaining = 100.0 - changed_val
-
-    if not other_keys:
-        return
-
-    other_sum = sum(vals[k] for k in other_keys)
-
-    if other_sum <= 1e-9:
-        even = remaining / len(other_keys)
-        for k in other_keys:
-            st.session_state[k] = even
-    else:
-        scale = remaining / other_sum
-        for k in other_keys:
-            st.session_state[k] = float(st.session_state.get(k, 0.0)) * scale
-
-
-# =========================
 # Secrets / DB URL
 # =========================
 def get_database_url() -> str | None:
@@ -299,6 +171,7 @@ create index if not exists idx_transfer_lines_order on public.transfer_order_lin
 def connect():
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL not set.")
+
     return psycopg.connect(
         DATABASE_URL,
         autocommit=True,
@@ -327,7 +200,7 @@ def exec_schema(sql_blob: str):
         exec_sql(stmt + ";")
 
 
-@st.cache_data(ttl=10)
+@st.cache_data(ttl=60)
 def read_sql(sql: str, params=None) -> list[dict]:
     params = params or ()
     rows = exec_sql(sql, params=params, fetch="all")
@@ -338,8 +211,15 @@ def invalidate_cache():
     st.cache_data.clear()
 
 
+@st.cache_resource
+def init_app_once():
+    exec_schema(SCHEMA_SQL)
+    ensure_default_locations()
+    return True
+
+
 # =========================
-# Business logic
+# Core helpers
 # =========================
 def ensure_default_locations():
     for loc in DEFAULT_LOCATIONS:
@@ -361,6 +241,110 @@ def ensure_stocks_for_item(item_id: int):
         )
 
 
+# =========================
+# Prep planner helpers
+# =========================
+def _prep_slider_keys(menu_df):
+    return [f"prep_mix_{int(row['id'])}" for _, row in menu_df.iterrows()]
+
+
+def _rebalance_mix(changed_key: str, all_keys: list[str]):
+    changed_val = float(st.session_state.get(changed_key, 0.0))
+    changed_val = max(0.0, min(100.0, changed_val))
+    st.session_state[changed_key] = changed_val
+
+    other_keys = [k for k in all_keys if k != changed_key]
+    if not other_keys:
+        return
+
+    remaining = max(0.0, 100.0 - changed_val)
+    other_total = sum(float(st.session_state.get(k, 0.0)) for k in other_keys)
+
+    if other_total <= 0:
+        base = int(remaining // len(other_keys))
+        remainder = int(remaining - (base * len(other_keys)))
+        for i, k in enumerate(other_keys):
+            st.session_state[k] = float(base + (1 if i < remainder else 0))
+        return
+
+    new_vals = []
+    running = 0
+    for i, k in enumerate(other_keys):
+        if i < len(other_keys) - 1:
+            v = int(round(remaining * (float(st.session_state.get(k, 0.0)) / other_total)))
+            new_vals.append(v)
+            running += v
+        else:
+            new_vals.append(int(max(0, round(remaining - running))))
+
+    diff = int(round(remaining - sum(new_vals)))
+    if new_vals:
+        new_vals[-1] += diff
+
+    for k, v in zip(other_keys, new_vals):
+        st.session_state[k] = float(max(0, v))
+
+
+def _apply_prep_preset(menu_df, preset_name: str):
+    preset = PREP_PRESETS.get(preset_name, {})
+    for _, row in menu_df.iterrows():
+        key = f"prep_mix_{int(row['id'])}"
+        item_name = str(row["name"]).strip().lower()
+        st.session_state[key] = float(preset.get(item_name, 0.0))
+
+
+def _build_prep_pdf(target, mix_rows, ingredient_rows, transfer_rows) -> bytes:
+    buf = BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    _, height = A4
+
+    y = height - 20 * mm
+    left = 15 * mm
+
+    def line(text, size=10, step=6):
+        nonlocal y
+        c.setFont("Helvetica", size)
+        c.drawString(left, y, text)
+        y -= step * mm
+        if y < 20 * mm:
+            c.showPage()
+            y = height - 20 * mm
+
+    c.setTitle("JAEJU Prep Plan")
+    line("JAEJU Prep Plan", 14, 8)
+    line(datetime.now().strftime("%d %b %Y %H:%M"), 9, 6)
+    line(f"Target turnover: ${target:,.2f}", 10, 8)
+
+    line("Menu Mix / Estimated Units", 12, 7)
+    for r in mix_rows:
+        line(
+            f"{r['Item']}: {r['Mix %']:.0f}% | ${r['Revenue share ($)']:.2f} | {r['Estimated units']:.1f} units",
+            9,
+            5,
+        )
+
+    y -= 2 * mm
+    line("Ingredients Required", 12, 7)
+    for r in ingredient_rows:
+        line(f"{r['Item']}: {r['Qty needed']:.2f} {r['Unit']}", 9, 5)
+
+    y -= 2 * mm
+    line("Draft Transfer Order", 12, 7)
+    for r in transfer_rows:
+        line(
+            f"{r['Item']}: {r['Transfer qty']:.2f} {r['Unit']} | {r['From']} -> {r['To']}",
+            9,
+            5,
+        )
+
+    c.save()
+    buf.seek(0)
+    return buf.getvalue()
+
+
+# =========================
+# Business logic
+# =========================
 def upsert_item(name: str, unit: str, par: Decimal, active: bool):
     row = exec_sql(
         """
@@ -409,6 +393,7 @@ def add_stock_delta(item_id: int, location: str, qty_delta: Decimal, reason: str
         """,
         (item_id, location, qty_delta, reason, (note.strip() if note else None)),
     )
+
     invalidate_cache()
 
 
@@ -502,7 +487,7 @@ def record_sale(menu_item_id: int, qty: Decimal, price_each: Decimal, payment: s
 
 
 # =========================
-# Transfer Orders
+# Transfer orders
 # =========================
 def create_transfer_order(from_location: str, to_location: str, note: str | None = None, lines: list[dict] | None = None) -> int:
     row = exec_sql(
@@ -530,40 +515,6 @@ def create_transfer_order(from_location: str, to_location: str, note: str | None
 
     invalidate_cache()
     return order_id
-
-
-def add_transfer_line(order_id: int, item_id: int, qty: Decimal):
-    exec_sql(
-        """
-        insert into public.transfer_order_lines(order_id, item_id, qty)
-        values (%s, %s, %s)
-        on conflict (order_id, item_id)
-        do update set qty = excluded.qty;
-        """,
-        (order_id, item_id, qty),
-    )
-    invalidate_cache()
-
-
-def get_transfer(order_id: int) -> dict | None:
-    return exec_sql(
-        "select * from public.transfer_orders where id=%s;",
-        (order_id,),
-        fetch="one",
-    )
-
-
-def get_transfer_lines(order_id: int) -> list[dict]:
-    return read_sql(
-        """
-        select l.id, l.item_id, i.name as item, i.unit, l.qty
-        from public.transfer_order_lines l
-        join public.items i on i.id = l.item_id
-        where l.order_id = %s
-        order by i.name;
-        """,
-        (order_id,),
-    )
 
 
 def list_transfer_orders(status: str = "draft") -> pd.DataFrame:
@@ -734,7 +685,7 @@ def df_sales_today() -> pd.DataFrame:
 
 
 # =========================
-# UI Pages
+# Pages
 # =========================
 def page_dashboard():
     st.header("Dashboard")
@@ -766,7 +717,7 @@ def page_dashboard():
     st.subheader("Stock snapshot")
     snap = df_stocks()
     if snap.empty:
-        st.warning("No stock rows yet. Use Adjust Stock or Receive a transfer order once.")
+        st.warning("No stock rows yet.")
     else:
         st.dataframe(snap, use_container_width=True, hide_index=True)
 
@@ -780,94 +731,352 @@ def page_dashboard():
 def page_items():
     st.header("Items")
 
-    df = df_items(active_only=False)
-    if df.empty:
-        st.info("No items yet. Add one below.")
-    else:
-        st.dataframe(df, use_container_width=True, hide_index=True)
+    tab1, tab2 = st.tabs(["Add Item", "Edit Item"])
 
-    st.divider()
-    st.subheader("Add / Update item")
+    with tab1:
+        df = df_items(active_only=False)
+        if df.empty:
+            st.info("No items yet. Add one below.")
+        else:
+            st.dataframe(df, use_container_width=True, hide_index=True)
 
-    with st.form("item_form", clear_on_submit=True):
-        name = st.text_input("Name")
-        unit = st.text_input("Unit", value="Each")
-        par = st.number_input("Par level", min_value=0.0, value=0.0, step=1.0)
-        active = st.checkbox("Active", value=True)
-        submitted = st.form_submit_button("Save item")
+        st.divider()
+        st.subheader("Add new item")
 
-    if submitted:
-        if not name.strip():
-            st.error("Item name is required.")
+        with st.form("item_form", clear_on_submit=True):
+            name = st.text_input("Name")
+            unit = st.text_input("Unit", value="Each")
+            par = st.number_input("Par level", min_value=0.0, value=0.0, step=1.0)
+            active = st.checkbox("Active", value=True)
+            submitted = st.form_submit_button("Save item")
+
+        if submitted:
+            if not name.strip():
+                st.error("Item name is required.")
+                return
+
+            upsert_item(
+                name=name,
+                unit=unit,
+                par=Decimal(str(par)),
+                active=active,
+            )
+            st.success("Item saved.")
+            st.rerun()
+
+    with tab2:
+        st.subheader("Edit existing item")
+
+        items_df = df_items(active_only=False)
+
+        if items_df.empty:
+            st.info("No items to edit yet.")
             return
-        upsert_item(name=name, unit=unit, par=Decimal(str(par)), active=active)
-        st.success("Saved.")
-        st.rerun()
+
+        selected_item_name = st.selectbox(
+            "Choose item",
+            items_df["name"].tolist(),
+            key="edit_item_select"
+        )
+
+        selected_row = items_df.loc[items_df["name"] == selected_item_name].iloc[0]
+        item_id = int(selected_row["id"])
+
+        with st.form("edit_item_form"):
+            edit_name = st.text_input("Name", value=str(selected_row["name"]))
+            edit_unit = st.text_input("Unit", value=str(selected_row["unit"]))
+            edit_par = st.number_input(
+                "Par level",
+                min_value=0.0,
+                value=float(selected_row["par"]),
+                step=1.0
+            )
+            edit_active = st.checkbox("Active", value=bool(selected_row["active"]))
+
+            col1, col2 = st.columns(2)
+            with col1:
+                save_edit = st.form_submit_button("Update item")
+            with col2:
+                deactivate_item = st.form_submit_button("Deactivate item")
+
+        if save_edit:
+            if not edit_name.strip():
+                st.error("Item name is required.")
+            else:
+                exec_sql(
+                    """
+                    update public.items
+                    set name=%s, unit=%s, par=%s, active=%s
+                    where id=%s;
+                    """,
+                    (
+                        edit_name.strip(),
+                        edit_unit.strip(),
+                        Decimal(str(edit_par)),
+                        edit_active,
+                        item_id,
+                    ),
+                )
+                invalidate_cache()
+                st.success("Item updated.")
+                st.rerun()
+
+        if deactivate_item:
+            exec_sql(
+                """
+                update public.items
+                set active=false
+                where id=%s;
+                """,
+                (item_id,),
+            )
+            invalidate_cache()
+            st.success("Item deactivated.")
+            st.rerun()
 
 
 def page_menu_admin():
     st.header("Menu Admin")
 
-    menu = df_menu(active_only=False)
-    if menu.empty:
-        st.info("No menu items yet.")
-    else:
-        st.dataframe(menu, use_container_width=True, hide_index=True)
-
-    st.divider()
-    st.subheader("Add / Update menu item")
-    with st.form("menu_form", clear_on_submit=True):
-        name = st.text_input("Menu item name")
-        price = st.number_input("Price (NZD)", min_value=0.0, value=0.0, step=0.5)
-        active = st.checkbox("Active", value=True)
-        submit = st.form_submit_button("Save menu item")
-
-    if submit:
-        if not name.strip():
-            st.error("Menu item name is required.")
-            return
-        upsert_menu_item(name=name, price=Decimal(str(price)), active=active)
-        st.success("Saved.")
-        st.rerun()
-
-    st.divider()
-    st.subheader("Recipe builder (ingredients per 1 sale)")
-
-    items = df_items(active_only=True)
-    menu_active = df_menu(active_only=True)
-    if items.empty or menu_active.empty:
-        st.info("You need at least 1 active item AND 1 active menu item.")
-        return
-
-    mi = st.selectbox("Menu item", menu_active["name"].tolist())
-    mi_id = int(menu_active.loc[menu_active["name"] == mi, "id"].iloc[0])
-
-    recipe_rows = read_sql(
-        """
-        select i.name as item, mii.qty_per_sale
-        from public.menu_item_ingredients mii
-        join public.items i on i.id = mii.item_id
-        where mii.menu_item_id = %s
-        order by i.name;
-        """,
-        (mi_id,),
+    tab1, tab2, tab3, tab4 = st.tabs(
+        ["Add Menu Item", "Edit Menu Item", "Add Recipe Line", "Edit Recipe Line"]
     )
-    if recipe_rows:
-        st.caption("Current recipe:")
-        st.dataframe(pd.DataFrame(recipe_rows), use_container_width=True, hide_index=True)
-    else:
-        st.caption("No ingredients set yet for this menu item.")
 
-    with st.form("recipe_form", clear_on_submit=True):
-        ing_name = st.selectbox("Ingredient item", items["name"].tolist())
-        ing_id = int(items.loc[items["name"] == ing_name, "id"].iloc[0])
-        qty_per_sale = st.number_input("Qty per sale (in the item unit)", value=0.0, step=0.1)
-        save_ing = st.form_submit_button("Save ingredient line")
+    with tab1:
+        menu = df_menu(active_only=False)
+        if menu.empty:
+            st.info("No menu items yet.")
+        else:
+            st.dataframe(menu, use_container_width=True, hide_index=True)
 
-    if save_ing:
-        set_recipe(menu_item_id=mi_id, item_id=ing_id, qty_per_sale=Decimal(str(qty_per_sale)))
-        st.success("Saved recipe line.")
-        st.rerun()
+        st.divider()
+        st.subheader("Add / Update menu item")
+
+        with st.form("menu_form", clear_on_submit=True):
+            name = st.text_input("Menu item name")
+            price = st.number_input("Price (NZD)", min_value=0.0, value=0.0, step=0.5)
+            active = st.checkbox("Active", value=True)
+            submit = st.form_submit_button("Save menu item")
+
+        if submit:
+            if not name.strip():
+                st.error("Menu item name is required.")
+                return
+            upsert_menu_item(name=name, price=Decimal(str(price)), active=active)
+            st.success("Saved.")
+            st.rerun()
+
+    with tab2:
+        st.subheader("Edit existing menu item")
+
+        menu_df = df_menu(active_only=False)
+        if menu_df.empty:
+            st.info("No menu items to edit yet.")
+        else:
+            selected_menu_name = st.selectbox(
+                "Choose menu item",
+                menu_df["name"].tolist(),
+                key="edit_menu_select"
+            )
+
+            selected_row = menu_df.loc[menu_df["name"] == selected_menu_name].iloc[0]
+            menu_id = int(selected_row["id"])
+
+            with st.form("edit_menu_form"):
+                edit_name = st.text_input("Menu item name", value=str(selected_row["name"]))
+                edit_price = st.number_input(
+                    "Price (NZD)",
+                    min_value=0.0,
+                    value=float(selected_row["price"]),
+                    step=0.5
+                )
+                edit_active = st.checkbox("Active", value=bool(selected_row["active"]))
+
+                col1, col2 = st.columns(2)
+                with col1:
+                    save_menu_edit = st.form_submit_button("Update menu item")
+                with col2:
+                    deactivate_menu = st.form_submit_button("Deactivate menu item")
+
+            if save_menu_edit:
+                if not edit_name.strip():
+                    st.error("Menu item name is required.")
+                else:
+                    exec_sql(
+                        """
+                        update public.menu_items
+                        set name=%s, price=%s, active=%s
+                        where id=%s;
+                        """,
+                        (
+                            edit_name.strip(),
+                            Decimal(str(edit_price)),
+                            edit_active,
+                            menu_id,
+                        ),
+                    )
+                    invalidate_cache()
+                    st.success("Menu item updated.")
+                    st.rerun()
+
+            if deactivate_menu:
+                exec_sql(
+                    """
+                    update public.menu_items
+                    set active=false
+                    where id=%s;
+                    """,
+                    (menu_id,),
+                )
+                invalidate_cache()
+                st.success("Menu item deactivated.")
+                st.rerun()
+
+    with tab3:
+        st.subheader("Add recipe line")
+
+        items = df_items(active_only=True)
+        menu_active = df_menu(active_only=True)
+
+        if items.empty or menu_active.empty:
+            st.info("You need at least 1 active item and 1 active menu item.")
+        else:
+            mi = st.selectbox("Menu item", menu_active["name"].tolist(), key="recipe_menu_add")
+            mi_id = int(menu_active.loc[menu_active["name"] == mi, "id"].iloc[0])
+
+            recipe_rows = read_sql(
+                """
+                select i.name as item, mii.qty_per_sale
+                from public.menu_item_ingredients mii
+                join public.items i on i.id = mii.item_id
+                where mii.menu_item_id = %s
+                order by i.name;
+                """,
+                (mi_id,),
+            )
+
+            if recipe_rows:
+                st.caption("Current recipe:")
+                st.dataframe(pd.DataFrame(recipe_rows), use_container_width=True, hide_index=True)
+            else:
+                st.caption("No ingredients set yet for this menu item.")
+
+            with st.form("recipe_form", clear_on_submit=True):
+                ing_name = st.selectbox("Ingredient item", items["name"].tolist())
+                ing_id = int(items.loc[items["name"] == ing_name, "id"].iloc[0])
+                qty_per_sale = st.number_input("Qty per sale (in the item unit)", value=0.0, step=0.1)
+                save_ing = st.form_submit_button("Save ingredient line")
+
+            if save_ing:
+                set_recipe(menu_item_id=mi_id, item_id=ing_id, qty_per_sale=Decimal(str(qty_per_sale)))
+                st.success("Saved recipe line.")
+                st.rerun()
+
+    with tab4:
+        st.subheader("Edit recipe line")
+
+        items = df_items(active_only=True)
+        menu_active = df_menu(active_only=True)
+
+        if items.empty or menu_active.empty:
+            st.info("You need at least 1 active item and 1 active menu item.")
+        else:
+            edit_menu_name = st.selectbox(
+                "Choose menu item",
+                menu_active["name"].tolist(),
+                key="edit_recipe_menu"
+            )
+            edit_menu_id = int(menu_active.loc[menu_active["name"] == edit_menu_name, "id"].iloc[0])
+
+            recipe_df = pd.DataFrame(
+                read_sql(
+                    """
+                    select
+                        mii.menu_item_id,
+                        mii.item_id,
+                        i.name as item_name,
+                        i.unit,
+                        mii.qty_per_sale
+                    from public.menu_item_ingredients mii
+                    join public.items i on i.id = mii.item_id
+                    where mii.menu_item_id = %s
+                    order by i.name;
+                    """,
+                    (edit_menu_id,),
+                )
+            )
+
+            if recipe_df.empty:
+                st.info("No recipe lines yet for this menu item.")
+            else:
+                selected_ing_name = st.selectbox(
+                    "Choose ingredient line",
+                    recipe_df["item_name"].tolist(),
+                    key="edit_recipe_line"
+                )
+
+                selected_recipe_row = recipe_df.loc[recipe_df["item_name"] == selected_ing_name].iloc[0]
+                current_item_id = int(selected_recipe_row["item_id"])
+
+                all_item_names = items["name"].tolist()
+                current_item_name = str(selected_recipe_row["item_name"])
+                current_index = all_item_names.index(current_item_name) if current_item_name in all_item_names else 0
+
+                with st.form("edit_recipe_form"):
+                    new_ing_name = st.selectbox(
+                        "Ingredient item",
+                        all_item_names,
+                        index=current_index
+                    )
+                    new_item_id = int(items.loc[items["name"] == new_ing_name, "id"].iloc[0])
+
+                    new_qty = st.number_input(
+                        "Qty per sale",
+                        min_value=0.0,
+                        value=float(selected_recipe_row["qty_per_sale"]),
+                        step=0.1
+                    )
+
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        save_recipe_edit = st.form_submit_button("Update recipe line")
+                    with col2:
+                        delete_recipe_line = st.form_submit_button("Delete recipe line")
+
+                if save_recipe_edit:
+                    exec_sql(
+                        """
+                        delete from public.menu_item_ingredients
+                        where menu_item_id=%s and item_id=%s;
+                        """,
+                        (edit_menu_id, current_item_id),
+                    )
+
+                    exec_sql(
+                        """
+                        insert into public.menu_item_ingredients(menu_item_id, item_id, qty_per_sale)
+                        values (%s, %s, %s)
+                        on conflict (menu_item_id, item_id)
+                        do update set qty_per_sale=excluded.qty_per_sale;
+                        """,
+                        (edit_menu_id, new_item_id, Decimal(str(new_qty))),
+                    )
+
+                    invalidate_cache()
+                    st.success("Recipe line updated.")
+                    st.rerun()
+
+                if delete_recipe_line:
+                    exec_sql(
+                        """
+                        delete from public.menu_item_ingredients
+                        where menu_item_id=%s and item_id=%s;
+                        """,
+                        (edit_menu_id, current_item_id),
+                    )
+                    invalidate_cache()
+                    st.success("Recipe line deleted.")
+                    st.rerun()
 
 
 def page_adjust_stock():
@@ -948,7 +1157,7 @@ def page_pos():
             location=location,
             event_name=event_name.strip() or None,
         )
-        st.success("Sale recorded (and ingredients deducted if recipe exists).")
+        st.success("Sale recorded.")
         st.rerun()
 
 
@@ -1140,6 +1349,10 @@ def page_orders():
 def page_prep_planner():
     st.header("Prep Planner")
 
+    # Keep target value when leaving page and coming back
+    if "prep_target_turnover" not in st.session_state:
+        st.session_state["prep_target_turnover"] = 8000.0
+
     menu_df = df_menu(active_only=True)
 
     if menu_df is None or len(menu_df) == 0:
@@ -1157,7 +1370,6 @@ def page_prep_planner():
     target = st.number_input(
         "Target turnover ($)",
         min_value=0.0,
-        value=float(st.session_state.get("prep_target_turnover", 8000.0)),
         step=100.0,
         key="prep_target_turnover",
     )
@@ -1361,23 +1573,22 @@ def main():
         )
         st.stop()
 
-    with st.expander("🔧 DB connection test"):
-        try:
-            test = exec_sql("select now() as now;", fetch="one")
-            st.success("DB connected.")
-            st.write(test)
-        except Exception as e:
-            st.error("DB init failed. Check DATABASE_URL and Supabase pooler settings.")
-            st.exception(e)
-            st.stop()
-
     try:
-        exec_schema(SCHEMA_SQL)
-        ensure_default_locations()
+        init_app_once()
     except Exception as e:
         st.error("Schema init failed.")
         st.exception(e)
         st.stop()
+
+    with st.expander("🔧 DB connection test"):
+        if st.button("Run DB test"):
+            try:
+                test = exec_sql("select now() as now;", fetch="one")
+                st.success("DB connected.")
+                st.write(test)
+            except Exception as e:
+                st.error("DB test failed.")
+                st.exception(e)
 
     mobile_mode = st.toggle("Mobile mode", value=False)
 

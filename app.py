@@ -1143,7 +1143,7 @@ def page_orders():
 
     items = df_items(active_only=True)
 
-  with tab1:
+with tab1:
     st.subheader("Create transfer order")
     if items.empty:
         st.info("Add items first.")

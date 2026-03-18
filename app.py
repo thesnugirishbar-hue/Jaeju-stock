@@ -1142,6 +1142,7 @@ def page_orders():
     tab1, tab2, tab3 = st.tabs(["Create transfer (Prep → Truck)", "Receive transfer", "Below par list"])
 
     items = df_items(active_only=True)
+tab1, tab2 = st.tabs(["Create Order", "Receive Order"])
 
 with tab1:
     st.subheader("Create transfer order")

@@ -1174,7 +1174,7 @@ with tab1:
             placeholder="Electric Ave Day 1 restock"
         )
 
-            st.write("")
+        st.write("")
 
             # cart stored in session
             st.session_state.setdefault("transfer_cart", [])  # list of dicts {item_id, item, unit, qty}

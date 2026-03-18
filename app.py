@@ -1,15 +1,12 @@
 import os
+from io import BytesIO
 from datetime import datetime
 from decimal import Decimal
 
 import pandas as pd
 import streamlit as st
-
 import psycopg
 from psycopg.rows import dict_row
-
-from io import BytesIO
-from datetime import datetime
 
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
@@ -57,6 +54,9 @@ PREP_PRESETS = {
 }
 
 
+# =========================
+# Prep planner helpers
+# =========================
 def _prep_slider_keys(menu_df):
     return [f"prep_mix_{int(row['id'])}" for _, row in menu_df.iterrows()]
 
@@ -155,25 +155,6 @@ def _build_prep_pdf(target, mix_rows, ingredient_rows, transfer_rows) -> bytes:
     return buf.getvalue()
 
 
-def _create_transfer_from_plan(ingredient_rows, from_loc: str, to_loc: str, note: str):
-    """
-    Assumes your existing app already has create_transfer_order() and exec_sql().
-    If your transfer_order_lines foreign key column is named order_id instead of transfer_order_id,
-    change that one column below.
-    """
-    new_id = create_transfer_order(from_loc, to_loc, note)
-
-    for r in ingredient_rows:
-        exec_sql(
-            """
-            insert into public.transfer_order_lines (transfer_order_id, item_id, qty)
-            values (%s, %s, %s)
-            """,
-            (new_id, int(r["item_id"]), float(r["Transfer qty"])),
-        )
-
-    return new_id
-
 # =========================
 # Helper for menu mix
 # =========================
@@ -217,8 +198,9 @@ def get_database_url() -> str | None:
 
 DATABASE_URL = get_database_url()
 
+
 # =========================
-# Schema (CLEAN + ORDER TRANSFERS)
+# Schema
 # =========================
 SCHEMA_SQL = r"""
 create table if not exists public.locations (
@@ -234,7 +216,6 @@ create table if not exists public.items (
   created_at timestamptz not null default now()
 );
 
--- Current stock snapshot (one row per item per location)
 create table if not exists public.stocks (
   item_id bigint not null references public.items(id) on delete cascade,
   location text not null references public.locations(name) on delete cascade,
@@ -243,7 +224,6 @@ create table if not exists public.stocks (
   primary key (item_id, location)
 );
 
--- Movement log (audit trail)
 create table if not exists public.movements (
   id bigserial primary key,
   item_id bigint not null references public.items(id) on delete cascade,
@@ -262,7 +242,6 @@ create table if not exists public.menu_items (
   created_at timestamptz not null default now()
 );
 
--- Recipe / ingredient usage per menu item
 create table if not exists public.menu_item_ingredients (
   menu_item_id bigint not null references public.menu_items(id) on delete cascade,
   item_id bigint not null references public.items(id) on delete cascade,
@@ -278,7 +257,6 @@ create table if not exists public.events (
   created_at timestamptz not null default now()
 );
 
--- POS sales log (menu-based)
 create table if not exists public.sales (
   id bigserial primary key,
   sold_at timestamptz not null default now(),
@@ -290,15 +268,12 @@ create table if not exists public.sales (
   event_name text null
 );
 
--- =========================
--- Transfer Orders (Prep Kitchen -> Food Truck etc)
--- =========================
 create table if not exists public.transfer_orders (
   id bigserial primary key,
   created_at timestamptz not null default now(),
   from_location text not null references public.locations(name),
   to_location text not null references public.locations(name),
-  status text not null default 'draft', -- draft | received | cancelled
+  status text not null default 'draft',
   note text null
 );
 
@@ -306,10 +281,10 @@ create table if not exists public.transfer_order_lines (
   id bigserial primary key,
   order_id bigint not null references public.transfer_orders(id) on delete cascade,
   item_id bigint not null references public.items(id) on delete cascade,
-  qty numeric not null default 0
+  qty numeric not null default 0,
+  unique (order_id, item_id)
 );
 
--- Helpful indexes
 create index if not exists idx_movements_item_time on public.movements(item_id, created_at desc);
 create index if not exists idx_sales_time on public.sales(sold_at desc);
 create index if not exists idx_sales_event on public.sales(event_name);
@@ -319,24 +294,22 @@ create index if not exists idx_transfer_lines_order on public.transfer_order_lin
 
 
 # =========================
-# DB Helpers (POOLER SAFE)
-#  - open/close per query
-#  - prepare_threshold=0 disables prepared statements (fixes pooler DuplicatePreparedStatement)
+# DB Helpers
 # =========================
 def connect():
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL not set.")
-
     return psycopg.connect(
         DATABASE_URL,
         autocommit=True,
         row_factory=dict_row,
     )
-  
+
+
 def exec_sql(sql: str, params=None, fetch: str | None = None):
     params = params or ()
     with connect() as conn:
-        with conn.cursor(binary=False) as cur:   # ← important
+        with conn.cursor(binary=False) as cur:
             cur.execute(sql, params)
 
             if fetch == "one":
@@ -347,17 +320,12 @@ def exec_sql(sql: str, params=None, fetch: str | None = None):
 
     return None
 
-def exec_schema(sql_blob: str):
-    """
-    Runs a big SQL schema safely by executing one statement at a time.
-    Fixes: 'cannot insert multiple commands into a prepared statement'
-    """
-    # Split on semicolons
-    statements = [s.strip() for s in sql_blob.split(";") if s.strip()]
 
-    # Run each statement separately
+def exec_schema(sql_blob: str):
+    statements = [s.strip() for s in sql_blob.split(";") if s.strip()]
     for stmt in statements:
         exec_sql(stmt + ";")
+
 
 @st.cache_data(ttl=10)
 def read_sql(sql: str, params=None) -> list[dict]:
@@ -369,164 +337,11 @@ def read_sql(sql: str, params=None) -> list[dict]:
 def invalidate_cache():
     st.cache_data.clear()
 
-# -------------------------
-# Stock Transfer helpers
-# -------------------------
-def create_transfer_order(from_loc: str, to_loc: str, note: str = "") -> int:
-    row = exec_sql(
-        """
-        insert into public.transfer_orders(from_location, to_location, status, note)
-        values (%s, %s, 'draft', %s)
-        returning id;
-        """,
-        (from_loc, to_loc, note.strip() or None),
-        fetch="one",
-    )
-    invalidate_cache()
-    return int(row["id"])
 
-
-def add_transfer_line(order_id: int, item_id: int, qty: Decimal):
-    exec_sql(
-        """
-        insert into public.transfer_order_lines(order_id, item_id, qty)
-        values (%s, %s, %s)
-        on conflict (order_id, item_id)
-        do update set qty = excluded.qty;
-        """,
-        (order_id, item_id, qty),
-    )
-    invalidate_cache()
-
-
-def get_transfer(order_id: int) -> dict | None:
-    row = exec_sql(
-        "select * from public.transfer_orders where id=%s;",
-        (order_id,),
-        fetch="one",
-    )
-    return row
-
-
-def get_transfer_lines(order_id: int) -> list[dict]:
-    return read_sql(
-        """
-        select l.id, l.item_id, i.name as item, i.unit, l.qty
-        from public.transfer_order_lines l
-        join public.items i on i.id = l.item_id
-        where l.order_id = %s
-        order by i.name;
-        """,
-        (order_id,),
-    )
-
-
-def submit_transfer(order_id: int):
-    exec_sql(
-        """
-        update public.transfer_orders
-        set status='submitted'
-        where id=%s and status='draft';
-        """,
-        (order_id,),
-    )
-    invalidate_cache()
-
-
-def cancel_transfer(order_id: int):
-    exec_sql(
-        """
-        update public.transfer_orders
-        set status='cancelled'
-        where id=%s and status in ('draft','submitted');
-        """,
-        (order_id,),
-    )
-    invalidate_cache()
-
-
-def fulfill_transfer(order_id: int):
-    order = get_transfer(order_id)
-    if not order:
-        raise RuntimeError("Transfer order not found.")
-    if order["status"] != "submitted":
-        raise RuntimeError("Only SUBMITTED transfers can be fulfilled.")
-
-    from_loc = order["from_location"]
-    to_loc = order["to_location"]
-    lines = get_transfer_lines(order_id)
-
-    if not lines:
-        raise RuntimeError("No lines on this transfer.")
-
-    # apply stock moves
-    for ln in lines:
-        item_id = int(ln["item_id"])
-        qty = Decimal(str(ln["qty"]))
-
-        # ensure stock rows exist
-        exec_sql(
-            """
-            insert into public.stocks(item_id, location, qty, updated_at)
-            values (%s, %s, 0, now())
-            on conflict (item_id, location) do nothing;
-            """,
-            (item_id, from_loc),
-        )
-        exec_sql(
-            """
-            insert into public.stocks(item_id, location, qty, updated_at)
-            values (%s, %s, 0, now())
-            on conflict (item_id, location) do nothing;
-            """,
-            (item_id, to_loc),
-        )
-
-        # subtract from FROM
-        exec_sql(
-            """
-            update public.stocks
-            set qty = qty - %s, updated_at = now()
-            where item_id=%s and location=%s;
-            """,
-            (qty, item_id, from_loc),
-        )
-        exec_sql(
-            """
-            insert into public.movements(item_id, location, qty_delta, reason, note)
-            values (%s, %s, %s, 'transfer_out', %s);
-            """,
-            (item_id, from_loc, -qty, f"Transfer #{order_id} to {to_loc}"),
-        )
-
-        # add to TO
-        exec_sql(
-            """
-            update public.stocks
-            set qty = qty + %s, updated_at = now()
-            where item_id=%s and location=%s;
-            """,
-            (qty, item_id, to_loc),
-        )
-        exec_sql(
-            """
-            insert into public.movements(item_id, location, qty_delta, reason, note)
-            values (%s, %s, %s, 'transfer_in', %s);
-            """,
-            (item_id, to_loc, qty, f"Transfer #{order_id} from {from_loc}"),
-        )
-
-    exec_sql(
-        """
-        update public.transfer_orders
-        set status='fulfilled', fulfilled_at=now()
-        where id=%s;
-        """,
-        (order_id,),
-    )
-    invalidate_cache()    
-
-    # Ensure default locations exist
+# =========================
+# Business logic
+# =========================
+def ensure_default_locations():
     for loc in DEFAULT_LOCATIONS:
         exec_sql(
             "insert into public.locations(name) values (%s) on conflict do nothing;",
@@ -534,9 +349,6 @@ def fulfill_transfer(order_id: int):
         )
 
 
-# =========================
-# Business logic
-# =========================
 def ensure_stocks_for_item(item_id: int):
     for loc in DEFAULT_LOCATIONS:
         exec_sql(
@@ -554,13 +366,14 @@ def upsert_item(name: str, unit: str, par: Decimal, active: bool):
         """
         insert into public.items (name, unit, par, active)
         values (%s, %s, %s, %s)
-        on conflict (name, unit)
+        on conflict (name)
         do update set
+            unit = excluded.unit,
             par = excluded.par,
             active = excluded.active
         returning *;
         """,
-        (name, unit, par, active),
+        (name.strip(), unit.strip(), par, active),
         fetch="one",
     )
 
@@ -571,7 +384,6 @@ def upsert_item(name: str, unit: str, par: Decimal, active: bool):
 
 
 def add_stock_delta(item_id: int, location: str, qty_delta: Decimal, reason: str, note: str | None = None):
-    # Ensure snapshot row exists
     exec_sql(
         """
         insert into public.stocks(item_id, location, qty, updated_at)
@@ -580,7 +392,7 @@ def add_stock_delta(item_id: int, location: str, qty_delta: Decimal, reason: str
         """,
         (item_id, location),
     )
-    # Apply delta
+
     exec_sql(
         """
         update public.stocks
@@ -589,7 +401,7 @@ def add_stock_delta(item_id: int, location: str, qty_delta: Decimal, reason: str
         """,
         (qty_delta, item_id, location),
     )
-    # Log movement
+
     exec_sql(
         """
         insert into public.movements(item_id, location, qty_delta, reason, note)
@@ -665,7 +477,6 @@ def record_sale(menu_item_id: int, qty: Decimal, price_each: Decimal, payment: s
         (menu_item_id, qty, price_each, payment, location, (event_name.strip() if event_name else None)),
     )
 
-    # Deduct ingredients based on recipe
     ingredients = read_sql(
         """
         select mii.item_id, mii.qty_per_sale
@@ -693,10 +504,7 @@ def record_sale(menu_item_id: int, qty: Decimal, price_each: Decimal, payment: s
 # =========================
 # Transfer Orders
 # =========================
-def create_transfer_order(from_location: str, to_location: str, note: str | None, lines: list[dict]) -> int:
-    """
-    lines: [{"item_id": int, "qty": Decimal}, ...]
-    """
+def create_transfer_order(from_location: str, to_location: str, note: str | None = None, lines: list[dict] | None = None) -> int:
     row = exec_sql(
         """
         insert into public.transfer_orders(from_location, to_location, status, note)
@@ -706,17 +514,56 @@ def create_transfer_order(from_location: str, to_location: str, note: str | None
         (from_location, to_location, (note.strip() if note else None)),
         fetch="one",
     )
+
     order_id = int(row["id"])
-    for ln in lines:
+
+    for ln in (lines or []):
         exec_sql(
             """
             insert into public.transfer_order_lines(order_id, item_id, qty)
-            values (%s, %s, %s);
+            values (%s, %s, %s)
+            on conflict (order_id, item_id)
+            do update set qty = excluded.qty;
             """,
             (order_id, int(ln["item_id"]), Decimal(str(ln["qty"]))),
         )
+
     invalidate_cache()
     return order_id
+
+
+def add_transfer_line(order_id: int, item_id: int, qty: Decimal):
+    exec_sql(
+        """
+        insert into public.transfer_order_lines(order_id, item_id, qty)
+        values (%s, %s, %s)
+        on conflict (order_id, item_id)
+        do update set qty = excluded.qty;
+        """,
+        (order_id, item_id, qty),
+    )
+    invalidate_cache()
+
+
+def get_transfer(order_id: int) -> dict | None:
+    return exec_sql(
+        "select * from public.transfer_orders where id=%s;",
+        (order_id,),
+        fetch="one",
+    )
+
+
+def get_transfer_lines(order_id: int) -> list[dict]:
+    return read_sql(
+        """
+        select l.id, l.item_id, i.name as item, i.unit, l.qty
+        from public.transfer_order_lines l
+        join public.items i on i.id = l.item_id
+        where l.order_id = %s
+        order by i.name;
+        """,
+        (order_id,),
+    )
 
 
 def list_transfer_orders(status: str = "draft") -> pd.DataFrame:
@@ -754,8 +601,10 @@ def receive_transfer_order(order_id: int):
         (order_id,),
         fetch="one",
     )
+
     if not ord_row:
         raise RuntimeError("Order not found.")
+
     if ord_row["status"] != "draft":
         raise RuntimeError("Only draft orders can be received.")
 
@@ -766,12 +615,10 @@ def receive_transfer_order(order_id: int):
         "select item_id, qty from public.transfer_order_lines where order_id=%s;",
         (order_id,),
     )
+
     if not lines:
         raise RuntimeError("No lines on this order.")
 
-    # Apply stock movements:
-    # - deduct from from_loc
-    # - add to to_loc
     for ln in lines:
         item_id = int(ln["item_id"])
         qty = Decimal(str(ln["qty"]))
@@ -801,16 +648,23 @@ def receive_transfer_order(order_id: int):
     invalidate_cache()
 
 
+def _create_transfer_from_plan(ingredient_rows, from_loc: str, to_loc: str, note: str):
+    lines = [
+        {"item_id": int(r["item_id"]), "qty": float(r["Transfer qty"])}
+        for r in ingredient_rows
+    ]
+    return create_transfer_order(from_loc, to_loc, note, lines=lines)
+
+
 # =========================
 # Data for UI
 # =========================
 def df_items(active_only: bool = False) -> pd.DataFrame:
     sql = "select id, name, unit, par, active, created_at from public.items"
-    params = ()
     if active_only:
         sql += " where active = true"
     sql += " order by name asc"
-    return pd.DataFrame(read_sql(sql, params))
+    return pd.DataFrame(read_sql(sql))
 
 
 def df_menu(active_only: bool = False) -> pd.DataFrame:
@@ -1132,83 +986,68 @@ def page_event_mode():
 def page_orders():
     st.header("Orders / Transfers")
 
-    # --- init transfer session state (MUST be before widgets) ---
-    st.session_state.setdefault("tr_item_id_pick", None)
-    st.session_state.setdefault("tr_qty_pick", 0.0)
     st.session_state.setdefault("tr_note", "")
     st.session_state.setdefault("tr_from_loc", "Prep Kitchen")
     st.session_state.setdefault("tr_to_loc", "Food Truck")
-    st.session_state.setdefault("transfer_cart",[])
-    tab1, tab2, tab3 = st.tabs(["Create transfer (Prep → Truck)", "Receive transfer", "Below par list"])
+    st.session_state.setdefault("tr_qty_pick", 0.0)
+    st.session_state.setdefault("transfer_cart", [])
 
-items = df_items(active_only=True)
-tab1, tab2 = st.tabs(["Create Order", "Receive Order"])
+    items = df_items(active_only=True)
+    tab1, tab2, tab3 = st.tabs(
+        ["Create Order", "Receive Order", "Below Par List"]
+    )
 
-with tab1:
-    st.subheader("Create transfer order")
+    with tab1:
+        st.subheader("Create transfer order")
 
-    if items.empty:
-        st.info("Add items first.")
-    else:
-        st.caption("Build an order in the prep kitchen, then receive it into the truck")
+        if items.empty:
+            st.info("Add items first.")
+        else:
+            st.caption("Build an order in the prep kitchen, then receive it into the truck")
 
-        if "tr_from_loc" not in st.session_state:
-            st.session_state["tr_from_loc"] = "Prep Kitchen"
-
-        from_location = st.selectbox(
-            "From location",
-            DEFAULT_LOCATIONS,
-            key="tr_from_loc",
-        )
-
-        if "tr_to_loc" not in st.session_state:
-            st.session_state["tr_to_loc"] = "Food Truck"
-
-        to_location = st.selectbox(
-            "To location",
-            DEFAULT_LOCATIONS,
-            key="tr_to_loc",
-        )
-
-        note = st.text_input(
-            "Note (optional)",
-            key="tr_note",
-            placeholder="Electric Ave Day 1 restock"
-        )
-
-        st.write("")
-
-        # cart stored in session
-        st.session_state.setdefault("transfer_cart", [])
-
-        c1, c2, c3 = st.columns([3, 1, 2])
-
-        with c1:
-            item_name = st.selectbox(
-                "Item",
-                items["name"].tolist(),
-                key="tr_item_pick"
+            from_location = st.selectbox(
+                "From location",
+                DEFAULT_LOCATIONS,
+                key="tr_from_loc",
             )
 
-        with c2:
-            qty = st.number_input(
-                "Qty",
-                min_value=0.0,
-                value=0.0,
-                step=1.0,
-                key="tr_qty_pick"
+            to_location = st.selectbox(
+                "To location",
+                DEFAULT_LOCATIONS,
+                key="tr_to_loc",
             )
 
-        with c3:
-            st.write("")
-            st.write("")
-            add_btn = st.button("Add line", type="primary")
+            note = st.text_input(
+                "Note (optional)",
+                key="tr_note",
+                placeholder="Electric Ave Day 1 restock",
+            )
 
-        if add_btn:
-            if qty <= 0:
-                st.error("Qty must be > 0")
-            else:
-                st.success("Line added")
+            st.write("")
+
+            c1, c2, c3 = st.columns([3, 1, 2])
+
+            with c1:
+                item_name = st.selectbox(
+                    "Item",
+                    items["name"].tolist(),
+                    key="tr_item_pick",
+                )
+
+            with c2:
+                qty = st.number_input(
+                    "Qty",
+                    min_value=0.0,
+                    value=0.0,
+                    step=1.0,
+                    key="tr_qty_pick",
+                )
+
+            with c3:
+                st.write("")
+                st.write("")
+                add_btn = st.button("Add line", type="primary")
+
             if add_btn:
                 if qty <= 0:
                     st.error("Qty must be > 0")
@@ -1220,21 +1059,24 @@ with tab1:
                             "item": row["name"],
                             "unit": row["unit"],
                             "qty": float(qty),
-                        })
-                        
+                        }
+                    )
                     st.rerun()
 
             cart = st.session_state.get("transfer_cart", [])
+
             if cart:
                 st.write("### Draft lines")
                 df_cart = pd.DataFrame(cart)
                 st.dataframe(df_cart[["item", "unit", "qty"]], use_container_width=True, hide_index=True)
 
                 colA, colB = st.columns([1, 1])
+
                 with colA:
                     if st.button("Clear draft"):
                         st.session_state["transfer_cart"] = []
                         st.rerun()
+
                 with colB:
                     if st.button("Save transfer order", type="primary"):
                         if from_location == to_location:
@@ -1244,16 +1086,20 @@ with tab1:
                                 from_location=from_location,
                                 to_location=to_location,
                                 note=note,
-                                lines=[{"item_id": ln["item_id"], "qty": Decimal(str(ln["qty"]))} for ln in cart],
+                                lines=[
+                                    {"item_id": ln["item_id"], "qty": Decimal(str(ln["qty"]))}
+                                    for ln in cart
+                                ],
                             )
                             st.session_state["transfer_cart"] = []
-                            st.success(f"Saved transfer order #{order_id} (draft). Now go to Receive transfer tab.")
+                            st.success(f"Saved transfer order #{order_id}. Now go to Receive Order.")
                             st.rerun()
             else:
                 st.info("No lines yet. Add at least 1 line to create an order.")
 
     with tab2:
-        st.subheader("Receive transfer order (applies stock movement)")
+        st.subheader("Receive transfer order")
+
         drafts = list_transfer_orders(status="draft")
         if drafts.empty:
             st.success("No draft transfer orders.")
@@ -1263,6 +1109,7 @@ with tab1:
                 lambda r: f"#{int(r['id'])} | {r['created_at']} | {r['from_location']} → {r['to_location']} | {r.get('note') or ''}".strip(),
                 axis=1,
             )
+
             picked = st.selectbox("Draft orders", drafts_display["label"].tolist())
             picked_id = int(picked.split("|")[0].replace("#", "").strip())
 
@@ -1271,7 +1118,8 @@ with tab1:
                 st.write("### Lines")
                 st.dataframe(lines[["item", "unit", "qty"]], use_container_width=True, hide_index=True)
 
-            st.warning("Receiving will: deduct stock from FROM location and add to TO location. This is permanent.")
+            st.warning("Receiving will deduct stock from FROM and add to TO. This is permanent.")
+
             if st.button("Receive this order", type="primary"):
                 try:
                     receive_transfer_order(picked_id)
@@ -1281,7 +1129,7 @@ with tab1:
                     st.error(str(e))
 
     with tab3:
-        st.subheader("Below par list (quick shopping list)")
+        st.subheader("Below par list")
         low = df_low_stock()
         if low.empty:
             st.success("Nothing below par right now.")
@@ -1485,8 +1333,8 @@ def page_prep_planner():
         )
 
     with b:
-        from_loc = st.selectbox("From", DEFAULT_LOCATIONS, index=0, key="prep_from_loc")
-        to_loc = st.selectbox("To", DEFAULT_LOCATIONS, index=min(1, len(DEFAULT_LOCATIONS) - 1), key="prep_to_loc")
+        from_loc = st.selectbox("From", DEFAULT_LOCATIONS, index=DEFAULT_LOCATIONS.index("Prep Kitchen"), key="prep_from_loc")
+        to_loc = st.selectbox("To", DEFAULT_LOCATIONS, index=DEFAULT_LOCATIONS.index("Food Truck"), key="prep_to_loc")
         note = st.text_input("Transfer note", value=f"Prep plan for ${target:,.0f}", key="prep_transfer_note")
 
     with c:
@@ -1496,93 +1344,7 @@ def page_prep_planner():
                 st.success(f"Created Transfer #{new_id} from planner.")
             except Exception as e:
                 st.error(str(e))
-def page_stock_transfer():
-    st.header("Stock Transfer (Prep Kitchen → Food Truck)")
 
-    items = df_items(active_only=True)
-    if items.empty:
-        st.info("Add items first.")
-        return
-
-    colA, colB = st.columns([2, 3])
-
-    with colA:
-        st.subheader("1) Create a transfer")
-        from_loc = st.selectbox("From", DEFAULT_LOCATIONS, index=DEFAULT_LOCATIONS.index("Prep Kitchen") if "Prep Kitchen" in DEFAULT_LOCATIONS else 0)
-        to_loc = st.selectbox("To", DEFAULT_LOCATIONS, index=DEFAULT_LOCATIONS.index("Food Truck") if "Food Truck" in DEFAULT_LOCATIONS else 0)
-        note = st.text_input("Note (optional)", placeholder="Electric Ave top-up")
-
-        if st.button("Create new transfer", type="primary"):
-            if from_loc == to_loc:
-                st.error("From and To cannot be the same.")
-            else:
-                new_id = create_transfer_order(from_loc, to_loc, note)
-                st.session_state["active_transfer_id"] = new_id
-                st.success(f"Created Transfer #{new_id}")
-                st.rerun()
-
-    with colB:
-        st.subheader("2) Add lines to current transfer")
-        active_id = st.session_state.get("active_transfer_id")
-
-        if not active_id:
-            st.info("Create a transfer on the left first.")
-            return
-
-        order = get_transfer(int(active_id))
-        if not order:
-            st.warning("Active transfer not found. Create a new one.")
-            st.session_state.pop("active_transfer_id", None)
-            return
-
-        st.caption(f"Working on **Transfer #{active_id}** | {order['from_location']} → {order['to_location']} | status: **{order['status']}**")
-
-        if order["status"] != "draft":
-            st.info("This transfer is not a draft. Create a new one if you want to edit lines.")
-        else:
-            with st.form("add_transfer_line", clear_on_submit=True):
-                item_name = st.selectbox("Item", items["name"].tolist())
-                item_id = int(items.loc[items["name"] == item_name, "id"].iloc[0])
-                qty = st.number_input("Qty to transfer", min_value=0.0, value=0.0, step=1.0)
-                add_btn = st.form_submit_button("Add / Update line")
-
-            if add_btn:
-                add_transfer_line(int(active_id), item_id, Decimal(str(qty)))
-                st.success("Line saved.")
-                st.rerun()
-
-        st.divider()
-        st.subheader("3) Review lines")
-        lines = get_transfer_lines(int(active_id))
-        if not lines:
-            st.warning("No lines yet.")
-        else:
-            st.dataframe(pd.DataFrame(lines)[["item", "unit", "qty"]], use_container_width=True, hide_index=True)
-
-        st.divider()
-        st.subheader("4) Submit / Fulfil")
-
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            if st.button("Submit transfer", disabled=(order["status"] != "draft")):
-                submit_transfer(int(active_id))
-                st.success("Submitted. Now you can fulfil it.")
-                st.rerun()
-
-        with col2:
-            if st.button("Fulfil transfer (moves stock)", type="primary", disabled=(order["status"] != "submitted")):
-                try:
-                    fulfill_transfer(int(active_id))
-                    st.success("Fulfilled. Stock moved + movements logged.")
-                    st.rerun()
-                except Exception as e:
-                    st.error(str(e))
-
-        with col3:
-            if st.button("Cancel", disabled=(order["status"] not in ("draft","submitted"))):
-                cancel_transfer(int(active_id))
-                st.warning("Cancelled.")
-                st.rerun()
 
 # =========================
 # Main
@@ -1595,7 +1357,7 @@ def main():
             "DATABASE_URL not set.\n\n"
             "In Streamlit → App settings → Secrets:\n\n"
             '```toml\nDATABASE_URL = "postgresql://...:6543/postgres"\n```\n\n'
-            "Use Supabase **Transaction pooler** (port 6543)."
+            "Use Supabase Transaction pooler (port 6543)."
         )
         st.stop()
 
@@ -1604,11 +1366,18 @@ def main():
             test = exec_sql("select now() as now;", fetch="one")
             st.success("DB connected.")
             st.write(test)
-            st.caption("If you see DuplicatePreparedStatement: pooler + prepared statements weren’t disabled.")
         except Exception as e:
             st.error("DB init failed. Check DATABASE_URL and Supabase pooler settings.")
             st.exception(e)
             st.stop()
+
+    try:
+        exec_schema(SCHEMA_SQL)
+        ensure_default_locations()
+    except Exception as e:
+        st.error("Schema init failed.")
+        st.exception(e)
+        st.stop()
 
     mobile_mode = st.toggle("Mobile mode", value=False)
 
@@ -1647,8 +1416,6 @@ def main():
         page_event_mode()
     elif page == "Prep Planner":
         page_prep_planner()
-    elif page == "Stock Transfer":
-        page_stock_transfer()
     elif page == "Orders":
         page_orders()
 

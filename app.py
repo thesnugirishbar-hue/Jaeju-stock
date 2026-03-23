@@ -13,18 +13,7 @@ from reportlab.lib.units import mm
 from reportlab.pdfgen import canvas
 
 def inject_app_styles():
-    st.markdown("""
-    <style>
-    .stApp {
-        background-color: #fafafa;
-    }
-
-    .block-container {
-        padding-top: 1rem;
-        max-width: 1200px;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+    pass
     
 # =========================
 # Config

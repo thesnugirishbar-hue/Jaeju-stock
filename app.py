@@ -1107,7 +1107,6 @@ def page_adjust_stock():
         st.success("Stock updated.")
         st.rerun()
 
-
 def page_movements():
     st.header("Movements")
 
@@ -1117,7 +1116,19 @@ def page_movements():
         st.info("No movements yet.")
         return
 
-    df["quantity"] = pd.to_numeric(df["quantity"], errors="coerce")
+    # Find the quantity column your dataframe actually uses
+    qty_col = None
+    for col in ["qty", "quantity", "change", "delta", "amount"]:
+        if col in df.columns:
+            qty_col = col
+            break
+
+    if qty_col is None:
+        st.error(f"Could not find quantity column. Found: {df.columns.tolist()}")
+        st.dataframe(df, use_container_width=True, hide_index=True)
+        return
+
+    df[qty_col] = pd.to_numeric(df[qty_col], errors="coerce")
     df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce")
     df["movement_type"] = df["movement_type"].astype(str).str.lower()
 
@@ -1139,9 +1150,41 @@ def page_movements():
     if selected_type != "All":
         filtered = filtered[filtered["movement_type"] == selected_type]
 
-    movements_in = filtered[filtered["quantity"] > 0].copy()
-    movements_out = filtered[filtered["quantity"] < 0].copy()
-    movements_out["quantity"] = movements_out["quantity"].abs()
+    movements_in = filtered[filtered[qty_col] > 0].copy()
+    movements_out = filtered[filtered[qty_col] < 0].copy()
+    movements_out[qty_col] = movements_out[qty_col].abs()
+
+    def prep_display(x):
+        x = x.copy()
+        x["created_at"] = x["created_at"].dt.strftime("%Y-%m-%d %H:%M:%S")
+        x = x.rename(columns={
+            "created_at": "Date",
+            "item_name": "Item",
+            "location": "Location",
+            qty_col: "Qty",
+            "movement_type": "Type",
+            "note": "Note",
+        })
+        cols = [c for c in ["Date", "Item", "Location", "Qty", "Type", "Note"] if c in x.columns]
+        return x[cols]
+
+    tab1, tab2 = st.tabs(["Movements In", "Movements Out"])
+
+    with tab1:
+        st.caption(f"{len(movements_in)} rows")
+        st.dataframe(
+            prep_display(movements_in.sort_values("created_at", ascending=False)),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    with tab2:
+        st.caption(f"{len(movements_out)} rows")
+        st.dataframe(
+            prep_display(movements_out.sort_values("created_at", ascending=False)),
+            use_container_width=True,
+            hide_index=True,
+        )
 
     def prep_display(x):
         x = x.copy()
@@ -1173,40 +1216,6 @@ def page_movements():
             use_container_width=True,
             hide_index=True,
         )
-
-    # --- Format display ---
-    def prep_display(x):
-        x = x.copy()
-        x["created_at"] = x["created_at"].dt.strftime("%Y-%m-%d %H:%M:%S")
-        x = x.rename(columns={
-            "created_at": "Date",
-            "item_name": "Item",
-            "location": "Location",
-            "qty": "Qty",
-            "movement_type": "Type",
-            "note": "Note",
-        })
-        return x
-
-    # --- Tabs ---
-    tab1, tab2 = st.tabs(["Movements In", "Movements Out"])
-
-    with tab1:
-        st.caption(f"{len(movements_in)} rows")
-        st.dataframe(
-            prep_display(movements_in.sort_values("created_at", ascending=False)),
-            use_container_width=True,
-            hide_index=True
-        )
-
-    with tab2:
-        st.caption(f"{len(movements_out)} rows")
-        st.dataframe(
-            prep_display(movements_out.sort_values("created_at", ascending=False)),
-            use_container_width=True,
-            hide_index=True
-        )
-
 
 def page_pos():
     st.header("POS")

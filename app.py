@@ -1654,8 +1654,9 @@ def page_prep_planner():
 # Main
 # =========================
 def main():
+    inject_app_styles()
     st.title(APP_TITLE)
-
+    
     if not DATABASE_URL:
         st.error(
             "DATABASE_URL not set.\n\n"

@@ -1117,11 +1117,10 @@ def page_movements():
         st.info("No movements yet.")
         return
 
-    # Ensure correct types
-    df["qty"] = pd.to_numeric(df["qty"], errors="coerce")
+    df["quantity"] = pd.to_numeric(df["quantity"], errors="coerce")
     df["created_at"] = pd.to_datetime(df["created_at"], errors="coerce")
+    df["movement_type"] = df["movement_type"].astype(str).str.lower()
 
-    # --- Filters ---
     col1, col2 = st.columns(2)
 
     with col1:
@@ -1129,10 +1128,8 @@ def page_movements():
         selected_location = st.selectbox("Location", locations, key="mov_loc")
 
     with col2:
-        types = ["All"] + sorted(df["movement_type"].dropna().astype(str).str.lower().unique().tolist())
+        types = ["All"] + sorted(df["movement_type"].dropna().unique().tolist())
         selected_type = st.selectbox("Type", types, key="mov_type")
-
-    df["movement_type"] = df["movement_type"].astype(str).str.lower()
 
     filtered = df.copy()
 
@@ -1142,12 +1139,40 @@ def page_movements():
     if selected_type != "All":
         filtered = filtered[filtered["movement_type"] == selected_type]
 
-    # --- Split IN / OUT ---
-    movements_in = filtered[filtered["qty"] > 0].copy()
-    movements_out = filtered[filtered["qty"] < 0].copy()
+    movements_in = filtered[filtered["quantity"] > 0].copy()
+    movements_out = filtered[filtered["quantity"] < 0].copy()
+    movements_out["quantity"] = movements_out["quantity"].abs()
 
-    # Make OUT easier to read
-    movements_out["qty"] = movements_out["qty"].abs()
+    def prep_display(x):
+        x = x.copy()
+        x["created_at"] = x["created_at"].dt.strftime("%Y-%m-%d %H:%M:%S")
+        x = x.rename(columns={
+            "created_at": "Date",
+            "item_name": "Item",
+            "location": "Location",
+            "quantity": "Qty",
+            "movement_type": "Type",
+            "note": "Note",
+        })
+        return x
+
+    tab1, tab2 = st.tabs(["Movements In", "Movements Out"])
+
+    with tab1:
+        st.caption(f"{len(movements_in)} rows")
+        st.dataframe(
+            prep_display(movements_in.sort_values("created_at", ascending=False)),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    with tab2:
+        st.caption(f"{len(movements_out)} rows")
+        st.dataframe(
+            prep_display(movements_out.sort_values("created_at", ascending=False)),
+            use_container_width=True,
+            hide_index=True,
+        )
 
     # --- Format display ---
     def prep_display(x):

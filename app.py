@@ -1440,10 +1440,7 @@ def page_orders():
 
 def page_prep_planner():
     st.header("Prep Planner")
-
-    # Keep target value when leaving page and coming back
-    if "prep_target_turnover" not in st.session_state:
-        st.session_state["prep_target_turnover"] = 8000.0
+    st.caption("Plan expected sales, estimate ingredient needs, and create a transfer order.")
 
     menu_df = df_menu(active_only=True)
 
@@ -1458,45 +1455,64 @@ def page_prep_planner():
         st.info("No active menu items with prices found.")
         return
 
-    st.subheader("1) Target turnover")
-    target = st.number_input(
-        "Target turnover ($)",
-        min_value=0.0,
-        step=100.0,
-        key="prep_target_turnover",
-    )
-
     slider_keys = _prep_slider_keys(menu_df)
 
-    if "prep_mix_initialized" not in st.session_state:
-        for k in slider_keys:
-            st.session_state[k] = 0.0
+    # Persistent planner state
+    st.session_state.setdefault("prep_target_turnover", 8000.0)
+    st.session_state.setdefault("prep_preset_select", "")
+    st.session_state.setdefault("prep_from_loc", "Prep Kitchen")
+    st.session_state.setdefault("prep_to_loc", "Food Truck")
+    st.session_state.setdefault("prep_transfer_note", "")
+    st.session_state.setdefault("prep_mix_initialized", False)
+
+    for k in slider_keys:
+        st.session_state.setdefault(k, 0.0)
+
+    # Apply default preset only once per session
+    if not st.session_state["prep_mix_initialized"]:
+        _apply_prep_preset(menu_df, "Market")
         st.session_state["prep_mix_initialized"] = True
 
-    left, mid, right = st.columns([2, 1, 1])
+    # Top controls
+    top1, top2, top3 = st.columns([1.2, 1, 1])
 
-    with left:
-        st.subheader("2) Menu mix")
+    with top1:
+        target = st.number_input(
+            "Target turnover ($)",
+            min_value=0.0,
+            step=100.0,
+            key="prep_target_turnover",
+        )
 
-    with mid:
+    with top2:
         preset = st.selectbox(
             "Preset",
             ["", "Market", "Event", "Catering"],
             key="prep_preset_select",
         )
-        if st.button("Apply preset"):
+        if st.button("Apply preset", key="prep_apply_preset", use_container_width=True):
             if preset:
                 _apply_prep_preset(menu_df, preset)
                 st.rerun()
 
-    with right:
-        if st.button("Reset mix"):
+    with top3:
+        st.write("")
+        st.write("")
+        if st.button("Reset planner", key="prep_reset_planner", use_container_width=True):
+            st.session_state["prep_target_turnover"] = 8000.0
+            st.session_state["prep_preset_select"] = ""
+            st.session_state["prep_from_loc"] = "Prep Kitchen"
+            st.session_state["prep_to_loc"] = "Food Truck"
+            st.session_state["prep_transfer_note"] = ""
             for k in slider_keys:
                 st.session_state[k] = 0.0
+            st.session_state["prep_mix_initialized"] = True
             st.rerun()
 
     rows = []
     total_pct = 0.0
+
+    st.subheader("Menu mix")
 
     for _, row in menu_df.iterrows():
         menu_id = int(row["id"])
@@ -1517,26 +1533,28 @@ def page_prep_planner():
         total_pct += pct
         revenue = target * (pct / 100.0)
         units = (revenue / price) if price > 0 else 0.0
-        rows.append((menu_id, name, price, pct, revenue, units))
 
-    mix_rows = [
-        {
-            "menu_id": menu_id,
-            "Item": name,
-            "Price": round(price, 2),
-            "Mix %": round(pct, 0),
-            "Revenue share ($)": round(revenue, 2),
-            "Estimated units": round(units, 1),
-        }
-        for menu_id, name, price, pct, revenue, units in rows
-    ]
+        rows.append(
+            {
+                "menu_id": menu_id,
+                "Item": name,
+                "Price": round(price, 2),
+                "Mix %": round(pct, 0),
+                "Revenue share ($)": round(revenue, 2),
+                "Estimated units": round(units, 1),
+            }
+        )
 
-    st.caption(f"Total mix: {total_pct:.0f}%")
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Target turnover", f"${target:,.0f}")
+    m2.metric("Total mix", f"{total_pct:.0f}%")
+    m3.metric("Menu items", f"{len(menu_df)}")
+
     if round(total_pct, 0) != 100:
         st.warning("Menu mix should total 100% for accurate prep planning.")
 
-    st.subheader("3) Estimated units sold")
-    st.dataframe(mix_rows, use_container_width=True, hide_index=True)
+    st.subheader("Estimated units sold")
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
     recipe_rows = read_sql(
         """
@@ -1558,13 +1576,16 @@ def page_prep_planner():
 
     ingredients = {}
 
-    for menu_id, name, price, pct, revenue, units in rows:
+    for row in rows:
+        menu_id = int(row["menu_id"])
+        units = float(row["Estimated units"])
+
         for r in recipe_rows:
             if int(r["menu_item_id"]) == menu_id:
                 item_name = str(r["item_name"])
                 unit = str(r["unit"])
                 qty_per_sale = float(r["qty_per_sale"])
-                qty_needed = float(units) * qty_per_sale
+                qty_needed = units * qty_per_sale
 
                 if item_name not in ingredients:
                     ingredients[item_name] = {
@@ -1589,7 +1610,7 @@ def page_prep_planner():
         for item, vals in sorted(ingredients.items())
     ]
 
-    st.subheader("4) Ingredients required")
+    st.subheader("Ingredients required")
     st.dataframe(
         [{"Item": r["Item"], "Qty needed": r["Qty needed"], "Unit": r["Unit"]} for r in ingredient_rows],
         use_container_width=True,
@@ -1608,7 +1629,7 @@ def page_prep_planner():
         for r in ingredient_rows
     ]
 
-    st.subheader("5) Draft transfer order")
+    st.subheader("Draft transfer order")
     st.dataframe(
         [
             {
@@ -1624,31 +1645,47 @@ def page_prep_planner():
         hide_index=True,
     )
 
-    st.subheader("6) Actions")
+    st.subheader("Actions")
     a, b, c = st.columns(3)
 
     with a:
-        pdf_bytes = _build_prep_pdf(target, mix_rows, ingredient_rows, transfer_rows)
+        pdf_bytes = _build_prep_pdf(target, rows, ingredient_rows, transfer_rows)
         st.download_button(
             "Export prep list PDF",
             data=pdf_bytes,
             file_name=f"jaeju_prep_plan_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
             mime="application/pdf",
+            use_container_width=True,
         )
 
     with b:
-        from_loc = st.selectbox("From", DEFAULT_LOCATIONS, index=DEFAULT_LOCATIONS.index("Prep Kitchen"), key="prep_from_loc")
-        to_loc = st.selectbox("To", DEFAULT_LOCATIONS, index=DEFAULT_LOCATIONS.index("Food Truck"), key="prep_to_loc")
-        note = st.text_input("Transfer note", value=f"Prep plan for ${target:,.0f}", key="prep_transfer_note")
+        from_loc = st.selectbox(
+            "From",
+            DEFAULT_LOCATIONS,
+            index=DEFAULT_LOCATIONS.index(st.session_state["prep_from_loc"]) if st.session_state["prep_from_loc"] in DEFAULT_LOCATIONS else 0,
+            key="prep_from_loc",
+        )
+        to_loc = st.selectbox(
+            "To",
+            DEFAULT_LOCATIONS,
+            index=DEFAULT_LOCATIONS.index(st.session_state["prep_to_loc"]) if st.session_state["prep_to_loc"] in DEFAULT_LOCATIONS else 0,
+            key="prep_to_loc",
+        )
 
     with c:
-        if st.button("Create transfer order from plan", type="primary"):
+        default_note = st.session_state["prep_transfer_note"] or f"Prep plan for ${target:,.0f}"
+        note = st.text_input(
+            "Transfer note",
+            value=default_note,
+            key="prep_transfer_note",
+        )
+
+        if st.button("Create transfer order from plan", key="prep_create_transfer", type="primary", use_container_width=True):
             try:
                 new_id = _create_transfer_from_plan(transfer_rows, from_loc, to_loc, note)
                 st.success(f"Created Transfer #{new_id} from planner.")
             except Exception as e:
                 st.error(str(e))
-
 
 # =========================
 # Main

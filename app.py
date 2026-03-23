@@ -12,6 +12,40 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.pdfgen import canvas
 
+def inject_app_styles():
+    st.markdown("""
+    <style>
+    .stApp {
+        background-color: #fafafa;
+    }
+
+    .block-container {
+        padding-top: 1.2rem;
+        padding-bottom: 2rem;
+        max-width: 1400px;
+    }
+
+    div[data-testid="stMetric"] {
+        background: white;
+        border: 1px solid #ececec;
+        border-radius: 16px;
+        padding: 14px;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.04);
+    }
+
+    div[data-testid="stDataFrame"] {
+        border-radius: 16px;
+        border: 1px solid #ececec;
+        overflow: hidden;
+        background: white;
+    }
+
+    button {
+        border-radius: 12px !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
 # =========================
 # Config
 # =========================

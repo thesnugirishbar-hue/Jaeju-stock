@@ -40,7 +40,7 @@ def inject_app_styles():
         background: white;
     }
 
-    button {
+    button[kind="primary"], button[kind="secondary"] {
         border-radius: 12px !important;
     }
     </style>

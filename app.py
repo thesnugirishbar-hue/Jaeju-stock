@@ -1186,42 +1186,145 @@ def page_pos():
         st.info("Add menu items in Menu Admin first.")
         return
 
-    col1, col2, col3, col4, col5 = st.columns([3, 1, 2, 2, 3])
+    # ---- session state ----
+    if "pos_cart" not in st.session_state:
+        st.session_state.pos_cart = []
 
-    with col1:
-        menu_name = st.selectbox("Menu item", menu["name"].tolist())
-    menu_id = int(menu.loc[menu["name"] == menu_name, "id"].iloc[0])
-    default_price = float(menu.loc[menu["name"] == menu_name, "price"].iloc[0])
+    if "pos_category" not in st.session_state:
+        st.session_state.pos_category = "All"
 
-    with col2:
-        qty = st.number_input("Qty", min_value=1.0, value=1.0, step=1.0)
+    # ---- helper functions ----
+    def add_to_cart(menu_item_id, name, price):
+        for item in st.session_state.pos_cart:
+            if item["menu_item_id"] == menu_item_id:
+                item["qty"] += 1
+                return
+        st.session_state.pos_cart.append({
+            "menu_item_id": int(menu_item_id),
+            "name": str(name),
+            "price_each": float(price),
+            "qty": 1,
+        })
 
-    with col3:
+    def increase_qty(index):
+        st.session_state.pos_cart[index]["qty"] += 1
+
+    def decrease_qty(index):
+        st.session_state.pos_cart[index]["qty"] -= 1
+        if st.session_state.pos_cart[index]["qty"] <= 0:
+            st.session_state.pos_cart.pop(index)
+
+    def remove_item(index):
+        st.session_state.pos_cart.pop(index)
+
+    def clear_cart():
+        st.session_state.pos_cart = []
+
+    def cart_total():
+        return sum(item["qty"] * item["price_each"] for item in st.session_state.pos_cart)
+
+    # ---- category handling ----
+    if "category" in menu.columns:
+        categories = ["All"] + sorted(
+            [str(c) for c in menu["category"].dropna().unique().tolist()]
+        )
+    else:
+        categories = ["All"]
+
+    # ---- sidebar controls ----
+    with st.sidebar:
+        st.subheader("Sale Settings")
         payment = st.selectbox("Payment", ["EFTPOS", "Cash", "Online", "Other"])
-
-    with col4:
         location = st.selectbox("Location", DEFAULT_LOCATIONS, index=0)
-
-    with col5:
         event_name = st.text_input("Event name (optional)", placeholder="Electric Ave Day 1")
 
-    price_each = st.number_input("Price each (NZD)", min_value=0.0, value=float(default_price), step=0.5)
-    line_total = float(qty) * float(price_each)
-    st.metric("Line total", f"${line_total:,.2f}")
+        st.divider()
 
-    if st.button("Record sale", type="primary"):
-        record_sale(
-            menu_item_id=menu_id,
-            qty=Decimal(str(qty)),
-            price_each=Decimal(str(price_each)),
-            payment=payment,
-            location=location,
-            event_name=event_name.strip() or None,
-        )
-        st.success("Sale recorded.")
-        st.rerun()
+        if st.button("Clear cart"):
+            clear_cart()
+            st.rerun()
 
+    # ---- layout ----
+    col_cat, col_items, col_cart = st.columns([1.1, 2.2, 1.5], gap="large")
 
+    # ---- left: categories ----
+    with col_cat:
+        st.subheader("Categories")
+        for cat in categories:
+            if st.button(cat, key=f"cat_{cat}", use_container_width=True):
+                st.session_state.pos_category = cat
+                st.rerun()
+
+    # ---- filter items ----
+    if st.session_state.pos_category == "All" or "category" not in menu.columns:
+        filtered_menu = menu.copy()
+    else:
+        filtered_menu = menu[menu["category"].astype(str) == st.session_state.pos_category].copy()
+
+    # ---- middle: product buttons ----
+    with col_items:
+        st.subheader(st.session_state.pos_category)
+
+        if filtered_menu.empty:
+            st.info("No items in this category.")
+        else:
+            item_cols = st.columns(2, gap="medium")
+            for idx, row in enumerate(filtered_menu.itertuples()):
+                with item_cols[idx % 2]:
+                    button_label = f"{row.name}\n${float(row.price):.2f}"
+                    if st.button(button_label, key=f"item_{row.id}", use_container_width=True):
+                        add_to_cart(row.id, row.name, row.price)
+                        st.rerun()
+
+    # ---- right: cart ----
+    with col_cart:
+        st.subheader("Current Order")
+
+        if not st.session_state.pos_cart:
+            st.info("No items added yet.")
+        else:
+            for i, item in enumerate(st.session_state.pos_cart):
+                st.markdown(f"**{item['name']}**")
+                st.caption(f"${item['price_each']:.2f} each")
+
+                c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
+                with c1:
+                    if st.button("−", key=f"minus_{i}", use_container_width=True):
+                        decrease_qty(i)
+                        st.rerun()
+                with c2:
+                    if st.button("+", key=f"plus_{i}", use_container_width=True):
+                        increase_qty(i)
+                        st.rerun()
+                with c3:
+                    st.markdown(f"**{item['qty']}**")
+                with c4:
+                    if st.button("Remove", key=f"remove_{i}", use_container_width=True):
+                        remove_item(i)
+                        st.rerun()
+
+                line_total = item["qty"] * item["price_each"]
+                st.write(f"Line total: **${line_total:.2f}**")
+                st.divider()
+
+        st.metric("Total", f"${cart_total():,.2f}")
+
+        if st.button("Record sale", type="primary", use_container_width=True):
+            if not st.session_state.pos_cart:
+                st.warning("Cart is empty.")
+            else:
+                for item in st.session_state.pos_cart:
+                    record_sale(
+                        menu_item_id=int(item["menu_item_id"]),
+                        qty=Decimal(str(item["qty"])),
+                        price_each=Decimal(str(item["price_each"])),
+                        payment=payment,
+                        location=location,
+                        event_name=event_name.strip() or None,
+                    )
+                st.success("Sale recorded.")
+                clear_cart()
+                st.rerun()
 def page_event_mode():
     st.header("Event Mode")
 
